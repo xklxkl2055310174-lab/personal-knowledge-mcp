@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "personal-knowledge-mcp"
+version = "0.1.0"
+description = "A learning-focused personal knowledge MCP server with safe local tools."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp==2.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+knowledge-mcp = "knowledge_mcp.server:main"
+knowledge-mcp-demo = "knowledge_mcp.demo:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/knowledge_mcp"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

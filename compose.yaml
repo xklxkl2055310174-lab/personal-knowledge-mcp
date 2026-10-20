@@ -1,0 +1,21 @@
+services:
+  knowledge-mcp:
+    build: .
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+      MCP_KNOWLEDGE_ROOT: /app/knowledge
+      MCP_WORKSPACE_ROOT: /app/workspace
+      MCP_REPOSITORY_ROOT: /app
+      MCP_RUNTIME_ROOT: /app/.runtime
+      MCP_ALLOWED_COMMANDS: python,python3,git,rg
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./knowledge:/app/knowledge:ro
+      - ./workspace:/app/workspace
+      - ./.runtime:/app/.runtime
+      - ./.git:/app/.git:ro
+    restart: unless-stopped

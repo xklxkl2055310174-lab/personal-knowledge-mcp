@@ -1,0 +1,36 @@
+.venv/
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.runtime/
+
+web/node_modules/
+*.log
+
+.idea/
+.run/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 工作区中的用户文件默认不提交，只保留演示资料和目录占位文件。
+workspace/*
+!workspace/.gitkeep
+!workspace/examples/
+workspace/examples/*
+!workspace/examples/project-overview.md
+!workspace/examples/file-security.md
+!workspace/examples/coding-agent-demo.md
+!workspace/outputs/
+workspace/outputs/*
+!workspace/outputs/.gitkeep
+
+# 本地直接启动时后端会托管 web/dist，仓库保留已构建的前端产物。
