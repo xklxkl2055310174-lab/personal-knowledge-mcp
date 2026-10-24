@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from .verification import run_verified
 
 TEXT_SUFFIXES = {".md", ".txt", ".rst"}
 WORD_RE = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
+SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def _attempts_meta(report: Any) -> list[dict[str, Any]]:
@@ -38,6 +40,7 @@ class KnowledgeServices:
     ) -> None:
         self.settings = settings
         self.urlopen = urlopen
+        self._file_locks: dict[str, asyncio.Lock] = {}
 
     def search_notes(self, query: str, top_k: int = 5) -> ToolResult:
         query = query.strip()
@@ -92,9 +95,13 @@ class KnowledgeServices:
 
     async def file_access(
         self,
-        action: Literal["read", "write", "list"],
+        action: Literal["list", "read", "write", "replace"],
         path: str = ".",
         content: str | None = None,
+        mode: Literal["create", "overwrite"] = "overwrite",
+        expected_sha256: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
     ) -> ToolResult:
         try:
             target = resolve_inside(self.settings.workspace_root, path)
@@ -122,43 +129,185 @@ class KnowledgeServices:
             if target.stat().st_size > self.settings.max_file_bytes:
                 return failure("file_too_large", "File exceeds MCP_MAX_FILE_BYTES", "parameter")
             try:
-                value = target.read_text(encoding="utf-8")
+                encoded = target.read_bytes()
+                value = encoded.decode("utf-8")
             except UnicodeError:
                 return failure("not_text", "Only UTF-8 text files are supported", "parameter")
-            return success({"path": path, "content": value}, bytes=len(value.encode("utf-8")))
+            return success(
+                {
+                    "path": path,
+                    "content": value,
+                    "bytes": len(encoded),
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                },
+                bytes=len(encoded),
+            )
 
-        if action != "write":
-            return failure("invalid_action", "action must be read, write, or list", "parameter")
-        if content is None:
-            return failure("missing_content", "content is required for write", "parameter")
-        encoded = content.encode("utf-8")
-        if len(encoded) > self.settings.max_file_bytes:
-            return failure("file_too_large", "content exceeds MCP_MAX_FILE_BYTES", "parameter")
-
-        async def write_once() -> dict[str, Any]:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-            await asyncio.to_thread(temporary.write_text, content, "utf-8")
-            await asyncio.to_thread(temporary.replace, target)
-            return {"path": path, "bytes": len(encoded)}
-
-        report = await run_verified(
-            write_once,
-            lambda value: (
-                target.exists()
-                and target.read_text(encoding="utf-8") == content
-                and value["bytes"] == len(encoded)
-            ),
-        )
-        if not report.verified or report.value is None:
+        if action not in {"write", "replace"}:
             return failure(
-                "verification_failed",
-                "Write could not be verified",
-                "transient",
-                retryable=True,
+                "invalid_action",
+                "action must be list, read, write, or replace",
+                "parameter",
+            )
+
+        normalized_expected: str | None = None
+        if expected_sha256 is not None:
+            normalized_expected = expected_sha256.strip().lower()
+            if not SHA256_RE.fullmatch(normalized_expected):
+                return failure(
+                    "invalid_expected_sha256",
+                    "expected_sha256 must be exactly 64 hexadecimal characters",
+                    "parameter",
+                )
+
+        if action == "write":
+            if mode not in {"create", "overwrite"}:
+                return failure(
+                    "invalid_mode", "mode must be create or overwrite", "parameter"
+                )
+            if content is None:
+                return failure("missing_content", "content is required for write", "parameter")
+            if mode == "create" and normalized_expected is not None:
+                return failure(
+                    "invalid_write_condition",
+                    "expected_sha256 cannot be used with create mode",
+                    "parameter",
+                )
+        else:
+            if old_text is None or new_text is None:
+                return failure(
+                    "missing_replace_text",
+                    "old_text and new_text are required for replace",
+                    "parameter",
+                )
+            if old_text == "":
+                return failure(
+                    "empty_old_text", "old_text must not be empty", "parameter"
+                )
+
+        lock_key = str(target)
+        lock = self._file_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            if target.exists() and not target.is_file():
+                return failure("not_a_file", "Path is not a file", "parameter")
+
+            current_encoded: bytes | None = None
+            current_text: str | None = None
+            current_sha256: str | None = None
+            if target.exists():
+                if target.stat().st_size > self.settings.max_file_bytes:
+                    return failure(
+                        "file_too_large", "File exceeds MCP_MAX_FILE_BYTES", "parameter"
+                    )
+                try:
+                    current_encoded = target.read_bytes()
+                    current_text = current_encoded.decode("utf-8")
+                except UnicodeError:
+                    return failure(
+                        "not_text", "Only UTF-8 text files are supported", "parameter"
+                    )
+                current_sha256 = hashlib.sha256(current_encoded).hexdigest()
+
+            if action == "write" and mode == "create" and current_encoded is not None:
+                return failure(
+                    "file_exists",
+                    "File already exists; use overwrite mode to replace it",
+                    "conflict",
+                )
+            if action == "replace" and current_encoded is None:
+                return failure("file_not_found", "File does not exist", "parameter")
+            if normalized_expected is not None:
+                if current_sha256 is None:
+                    return failure(
+                        "file_changed",
+                        "File no longer exists; read it again before writing",
+                        "conflict",
+                        details={"expected_sha256": normalized_expected, "actual_sha256": None},
+                    )
+                if current_sha256 != normalized_expected:
+                    return failure(
+                        "file_changed",
+                        "File content changed; read it again before writing",
+                        "conflict",
+                        details={
+                            "expected_sha256": normalized_expected,
+                            "actual_sha256": current_sha256,
+                        },
+                    )
+
+            replacements = 0
+            if action == "replace":
+                assert current_text is not None
+                assert old_text is not None
+                assert new_text is not None
+                replacements = current_text.count(old_text)
+                if replacements == 0:
+                    return failure(
+                        "old_text_not_found",
+                        "old_text was not found; read the latest file before replacing",
+                        "conflict",
+                    )
+                if replacements > 1:
+                    return failure(
+                        "ambiguous_old_text",
+                        "old_text occurs more than once; provide a larger unique block",
+                        "conflict",
+                        details={"occurrences": replacements},
+                    )
+                final_content = current_text.replace(old_text, new_text, 1)
+            else:
+                assert content is not None
+                final_content = content
+
+            final_encoded = final_content.encode("utf-8")
+            if len(final_encoded) > self.settings.max_file_bytes:
+                return failure(
+                    "file_too_large", "content exceeds MCP_MAX_FILE_BYTES", "parameter"
+                )
+            final_sha256 = hashlib.sha256(final_encoded).hexdigest()
+
+            async def write_once() -> dict[str, Any]:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+                try:
+                    await asyncio.to_thread(temporary.write_bytes, final_encoded)
+                    await asyncio.to_thread(temporary.replace, target)
+                finally:
+                    if temporary.exists():
+                        temporary.unlink(missing_ok=True)
+                result: dict[str, Any] = {
+                    "path": path,
+                    "bytes": len(final_encoded),
+                    "sha256": final_sha256,
+                }
+                if current_sha256 is not None:
+                    result["previous_sha256"] = current_sha256
+                if action == "replace":
+                    result["replacements"] = 1
+                return result
+
+            report = await run_verified(
+                write_once,
+                lambda value: (
+                    target.exists()
+                    and target.is_file()
+                    and target.read_bytes() == final_encoded
+                    and value["sha256"] == final_sha256
+                ),
+            )
+            if not report.verified or report.value is None:
+                return failure(
+                    "verification_failed",
+                    "Write could not be verified",
+                    "transient",
+                    retryable=True,
+                    attempts=_attempts_meta(report),
+                )
+            return success(
+                report.value,
+                verified=True,
                 attempts=_attempts_meta(report),
             )
-        return success(report.value, verified=True, attempts=_attempts_meta(report))
 
     async def git_query(
         self,

@@ -18,7 +18,7 @@
 | 工具 | 用途 | 关键保护 |
 | --- | --- | --- |
 | `search_notes` | 检索 `knowledge/notes` 中的 Markdown/Text | 文件大小、后缀、结果数量限制 |
-| `file_access` | 在 `workspace` 中读取、原子写入、列目录 | 相对路径沙箱、UTF-8、写后校验 |
+| `file_access` | 在 `workspace` 中列目录、读取、写入和局部替换 | 路径沙箱、SHA-256 冲突检测、原子写入、写后校验 |
 | `git_query` | 查询 status/branch/log/diff | 只读命令、仓库根目录限制 |
 | `ci_status` | 读取本地 CI 信息或 GitHub Actions | 参数校验、超时、Token 可选 |
 | `run_command` | 执行白名单命令 | `shell=False`、工作目录沙箱、超时、输出截断 |
@@ -34,7 +34,7 @@
 }
 ```
 
-失败时 `error.category` 是 `parameter`、`permission`、`timeout`、`transient` 或 `internal`。Agent 只应重试 `timeout`/`transient`。
+失败时 `error.category` 是 `parameter`、`permission`、`conflict`、`timeout`、`transient` 或 `internal`。Agent 只应重试 `timeout`/`transient`；遇到 `conflict` 应重新读取文件后再决策。
 
 ## 1. 本地启动（Windows / macOS / Linux）
 
@@ -72,10 +72,31 @@ uv run knowledge-mcp-demo "MCP 为什么适合连接 Agent 和工具？"
 | 工具调试台 `/tools` | 浏览器直接作为 MCP Client 调用 5 个工具，内置正常/错误示例，展示错误分类、是否可重试、Verification attempts 和原始 JSON-RPC |
 | 笔记与工作区 `/files` | 知识库笔记带行号只读浏览（可从 Agent 证据跳转到对应行）；工作区通过 `file_access` 浏览、新建、编辑并原子写入 |
 
-工具调试台的 `file_access` 支持浏览 `MCP_WORKSPACE_ROOT` 内的目录，并按 list/read/write
+工具调试台的 `file_access` 支持浏览 `MCP_WORKSPACE_ROOT` 内的目录，并按 list/read/write/replace
 模式选择目录或文件。文件选择器始终通过 MCP `file_access(action=list)` 获取目录内容，只显示
 相对于安全工作区的路径；它不会放开绝对路径访问，后端仍使用 `resolve_inside` 阻止路径越权。
 `workspace/examples/` 提供项目介绍、文件安全说明和 Coding Agent 文件工具演示任务。
+
+### 安全文件更新演示
+
+`read` 会在内容之外返回当前文件的 `sha256`。更新已有文件时，把该值作为
+`expected_sha256` 传给 `write` 或 `replace`；如果文件在读取后被其他调用修改，工具返回不可
+重试的 `conflict/file_changed`，不会覆盖新版本。`write` 的 `create` 模式只创建不存在的文件，
+`overwrite` 模式保持原有覆盖语义。
+
+```json
+{
+  "action": "replace",
+  "path": "examples/project-overview.md",
+  "expected_sha256": "从 read 返回结果复制的 64 位哈希",
+  "old_text": "需要唯一命中的原文",
+  "new_text": "替换后的文本"
+}
+```
+
+`replace` 要求 `old_text` 在最新文件中恰好出现一次；未命中或多次命中都会拒绝写入。成功写入
+仍采用“同目录临时文件 → 原子替换 → 重读内容与哈希”的 Verification Loop。所有路径继续受
+`MCP_WORKSPACE_ROOT` 约束，绝对路径和 `../` 越权路径不会因为新操作而放开。
 
 ### 接入真实 LLM
 

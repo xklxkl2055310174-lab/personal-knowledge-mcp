@@ -6,7 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ErrorCategory = Literal["parameter", "permission", "timeout", "transient", "internal"]
+ErrorCategory = Literal[
+    "parameter", "permission", "conflict", "timeout", "transient", "internal"
+]
 
 
 class ToolErrorInfo(BaseModel):

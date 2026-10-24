@@ -15,9 +15,20 @@ from knowledge_mcp.server import create_server
 async def test_all_five_tools_are_discoverable(settings: Settings) -> None:
     server = create_server(settings)
     async with Client(server) as client:
-        names = {tool.name for tool in (await client.list_tools()).tools}
+        tools = (await client.list_tools()).tools
+        names = {tool.name for tool in tools}
 
     assert names == {"search_notes", "file_access", "git_query", "ci_status", "run_command"}
+    file_tool = next(tool for tool in tools if tool.name == "file_access")
+    properties = file_tool.input_schema["properties"]
+    assert properties["action"]["enum"] == ["list", "read", "write", "replace"]
+    assert {
+        "content",
+        "mode",
+        "expected_sha256",
+        "old_text",
+        "new_text",
+    }.issubset(properties)
 
 
 @pytest.mark.asyncio

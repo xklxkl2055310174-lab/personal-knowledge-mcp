@@ -34,7 +34,7 @@
           <!-- file_access -->
           <div v-else-if="name === 'file_access'" class="grid form-grid">
             <label class="field">action
-              <select v-model="forms.file_access.action"><option>list</option><option>read</option><option>write</option></select>
+              <select v-model="forms.file_access.action"><option>list</option><option>read</option><option>write</option><option>replace</option></select>
             </label>
             <div class="field wide">
               <label for="file-access-path">path（相对工作区）</label>
@@ -43,8 +43,21 @@
                 <button type="button" class="secondary" @click="openFilePicker">浏览…</button>
               </div>
             </div>
+            <label v-if="forms.file_access.action === 'write'" class="field">mode
+              <select v-model="forms.file_access.mode"><option>create</option><option>overwrite</option></select>
+            </label>
+            <label v-if="['write', 'replace'].includes(forms.file_access.action)" class="field wide">
+              expected_sha256（可选，从 read 结果复制）
+              <input v-model.trim="forms.file_access.expected_sha256" class="mono" autocomplete="off" />
+            </label>
             <label v-if="forms.file_access.action === 'write'" class="field full">content
               <textarea v-model="forms.file_access.content" class="code" rows="4"></textarea>
+            </label>
+            <label v-if="forms.file_access.action === 'replace'" class="field full">old_text（必须唯一命中一次）
+              <textarea v-model="forms.file_access.old_text" class="code" rows="4"></textarea>
+            </label>
+            <label v-if="forms.file_access.action === 'replace'" class="field full">new_text
+              <textarea v-model="forms.file_access.new_text" class="code" rows="4"></textarea>
             </label>
           </div>
 
@@ -244,7 +257,10 @@ const filePicker = reactive({
 
 const forms = reactive({
   search_notes: { query: 'MCP Agent', top_k: 5 },
-  file_access: { action: 'list', path: '.', content: 'hello from web console\n' },
+  file_access: {
+    action: 'list', path: '.', content: 'hello from web console\n', mode: 'overwrite',
+    expected_sha256: '', old_text: '', new_text: ''
+  },
   git_query: { operation: 'status', repo_path: '.', limit: 10 },
   ci_status: { source: 'local', repository: '', limit: 5 },
   run_command: { command: `python -c "print('MCP command OK')"`, cwd: '.', timeout_seconds: 10 }
@@ -257,8 +273,10 @@ const presets = {
     { label: 'top_k 越界', form: { query: 'MCP', top_k: 99 } }
   ],
   file_access: [
-    { label: '写入并校验', form: { action: 'write', path: 'web/demo.md', content: '# 来自 Web 控制台\n' } },
+    { label: '写入并校验', form: { action: 'write', path: 'web/demo.md', content: '# 来自 Web 控制台\n', mode: 'overwrite', expected_sha256: '' } },
     { label: '读取', form: { action: 'read', path: 'web/demo.md' } },
+    { label: '局部替换', form: { action: 'replace', path: 'web/demo.md', old_text: '来自 Web 控制台', new_text: '来自 MCP replace', expected_sha256: '' } },
+    { label: '哈希冲突', form: { action: 'write', path: 'web/demo.md', content: '# 不应覆盖\n', mode: 'overwrite', expected_sha256: '0000000000000000000000000000000000000000000000000000000000000000' } },
     { label: '列出演示目录', form: { action: 'list', path: 'examples' } },
     { label: '读取项目介绍', form: { action: 'read', path: 'examples/project-overview.md' } },
     { label: '读取安全说明', form: { action: 'read', path: 'examples/file-security.md' } },
@@ -326,6 +344,7 @@ const formatBytes = value => {
 const pickerEntryLabel = entry => {
   if (entry.type === 'directory') return `进入目录 ${entry.name}`
   if (forms.file_access.action === 'write') return `选择已有文件作为写入目标 ${entry.name}`
+  if (forms.file_access.action === 'replace') return `选择文件进行局部替换 ${entry.name}`
   return `选择文件 ${entry.name}`
 }
 
@@ -397,7 +416,7 @@ const choosePickerEntry = entry => {
   const selected = joinPickerPath(filePicker.current, entry.name)
   if (entry.type === 'directory') {
     loadPickerDirectory(selected)
-  } else if (forms.file_access.action === 'read' || forms.file_access.action === 'write') {
+  } else if (['read', 'write', 'replace'].includes(forms.file_access.action)) {
     forms.file_access.path = selected
     closeFilePicker()
   }
@@ -431,7 +450,20 @@ const buildArgs = () => {
   const f = forms[name.value]
   switch (name.value) {
     case 'search_notes': return { query: f.query, top_k: Number(f.top_k) }
-    case 'file_access': return f.action === 'write' ? { action: f.action, path: f.path, content: f.content } : { action: f.action, path: f.path }
+    case 'file_access': {
+      const args = { action: f.action, path: f.path }
+      if (f.action === 'write') {
+        args.content = f.content
+        args.mode = f.mode
+      } else if (f.action === 'replace') {
+        args.old_text = f.old_text
+        args.new_text = f.new_text
+      }
+      if (['write', 'replace'].includes(f.action) && f.expected_sha256) {
+        args.expected_sha256 = f.expected_sha256
+      }
+      return args
+    }
     case 'git_query': return { operation: f.operation, repo_path: f.repo_path, limit: Number(f.limit) }
     case 'ci_status': return f.source === 'github' ? { source: f.source, repository: f.repository, limit: Number(f.limit) } : { source: f.source, limit: Number(f.limit) }
     case 'run_command': return { command: splitArgs(f.command), cwd: f.cwd, timeout_seconds: Number(f.timeout_seconds) || null }

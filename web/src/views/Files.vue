@@ -133,22 +133,39 @@ const openFile = async path => {
   saveResult.value = null
   const { structured } = await callTool('file_access', { action: 'read', path })
   if (!structured?.ok) { wsError.value = structured?.error?.message; return }
-  file.value = { path, content: structured.data.content }
+  file.value = {
+    path,
+    content: structured.data.content,
+    sha256: structured.data.sha256,
+    isNew: false
+  }
   dirty.value = false
 }
 
 const saveFile = async () => {
   saving.value = true
   try {
-    saveResult.value = await callTool('file_access', { action: 'write', path: file.value.path, content: file.value.content })
-    if (saveResult.value.structured?.ok) { dirty.value = false; listDir(dir.value) }
+    const arguments_ = {
+      action: 'write',
+      path: file.value.path,
+      content: file.value.content,
+      mode: file.value.isNew ? 'create' : 'overwrite'
+    }
+    if (!file.value.isNew && file.value.sha256) arguments_.expected_sha256 = file.value.sha256
+    saveResult.value = await callTool('file_access', arguments_)
+    if (saveResult.value.structured?.ok) {
+      file.value.sha256 = saveResult.value.structured.data.sha256
+      file.value.isNew = false
+      dirty.value = false
+      listDir(dir.value)
+    }
   } finally { saving.value = false }
 }
 
 const createFile = () => {
   const name = newName.value.trim()
   if (!name) return
-  file.value = { path: join(name), content: '' }
+  file.value = { path: join(name), content: '', sha256: null, isNew: true }
   dirty.value = true
   saveResult.value = null
   newName.value = ''

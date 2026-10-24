@@ -1,7 +1,7 @@
 // 前端展示用的静态说明（与后端 README 中的工具表保持一致）
 export const TOOL_META = {
   search_notes: { label: '笔记检索', guard: '文件大小、后缀、结果数量限制', icon: '🔎' },
-  file_access: { label: '文件读写', guard: '相对路径沙箱、UTF-8、原子写入 + 写后校验', icon: '📄' },
+  file_access: { label: '文件读写', guard: '路径沙箱、SHA-256 冲突检测、原子写入 + 写后校验', icon: '📄' },
   git_query: { label: 'Git 查询', guard: '固定只读子命令、仓库根目录限制', icon: '🌿' },
   ci_status: { label: 'CI 状态', guard: '参数校验、超时、Token 可选', icon: '🧪' },
   run_command: { label: '命令沙箱', guard: '白名单、shell=False、工作目录沙箱、超时、输出截断', icon: '⌨️' }
@@ -10,6 +10,7 @@ export const TOOL_META = {
 export const ERROR_CATEGORY = {
   parameter: { label: '参数错误', tone: 'orange', retry: false, hint: '相同输入不会自行变正确，应修正参数而不是重试' },
   permission: { label: '权限不足', tone: 'red', retry: false, hint: '越过沙箱或白名单，重试无意义，应直接拒绝' },
+  conflict: { label: '写入冲突', tone: 'red', retry: false, hint: '文件已变化，应重新读取最新内容和 SHA-256 后再决定是否写入' },
   timeout: { label: '超时', tone: 'orange', retry: true, hint: '可在上限内带退避重试' },
   transient: { label: '瞬时错误', tone: 'orange', retry: true, hint: '网络 / IO 抖动，可有限重试' },
   internal: { label: '内部错误', tone: 'red', retry: false, hint: '服务端缺陷，应记录并告警' }

@@ -13,6 +13,10 @@
 
 - [ ] `search_notes` 返回文件、行号、分数和片段。
 - [ ] `file_access` 写入后再次读取内容一致。
+- [ ] `file_access read` 返回内容对应的 SHA-256。
+- [ ] `file_access write(mode=create)` 不覆盖已存在文件。
+- [ ] `expected_sha256` 不匹配时返回不可重试的 `conflict/file_changed`。
+- [ ] `file_access replace` 只替换唯一命中的文本，并完成写后校验。
 - [ ] `file_access ../x` 返回 `permission`。
 - [ ] `git_query status` 不修改仓库。
 - [ ] `ci_status local` 能列出 `.github/workflows`。
