@@ -28,8 +28,15 @@ class Settings:
     runtime_root: Path
     max_file_bytes: int = 1_000_000
     command_timeout_seconds: float = 10.0
+    command_output_bytes: int = 20_000
     allowed_commands: tuple[str, ...] = ("python", "python3", "pytest", "git", "rg")
     github_token: str | None = None
+    sandbox_mode: str = "local"
+    sandbox_image: str = "python:3.12-slim"
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> Settings:
@@ -47,8 +54,15 @@ class Settings:
             runtime_root=_path_from_env("MCP_RUNTIME_ROOT", project / ".runtime"),
             max_file_bytes=int(os.getenv("MCP_MAX_FILE_BYTES", "1000000")),
             command_timeout_seconds=float(os.getenv("MCP_COMMAND_TIMEOUT_SECONDS", "10")),
+            command_output_bytes=int(os.getenv("MCP_COMMAND_OUTPUT_BYTES", "20000")),
             allowed_commands=commands,
             github_token=os.getenv("GITHUB_TOKEN") or None,
+            sandbox_mode=os.getenv("MCP_SANDBOX", "local").strip().lower(),
+            sandbox_image=os.getenv("MCP_SANDBOX_IMAGE", "python:3.12-slim").strip(),
+            llm_provider=os.getenv("LLM_PROVIDER") or None,
+            llm_model=os.getenv("LLM_MODEL") or None,
+            llm_base_url=os.getenv("LLM_BASE_URL") or None,
+            llm_api_key=os.getenv("LLM_API_KEY") or None,
         )
         settings.ensure_directories()
         return settings

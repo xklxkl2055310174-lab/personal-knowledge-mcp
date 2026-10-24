@@ -6,9 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ErrorCategory = Literal[
-    "parameter", "permission", "conflict", "timeout", "transient", "internal"
-]
+ErrorCategory = Literal["parameter", "permission", "conflict", "timeout", "transient", "internal"]
 
 
 class ToolErrorInfo(BaseModel):
@@ -50,3 +48,9 @@ def failure(
         ),
         meta=meta,
     )
+
+
+def merge_meta(result: ToolResult, **meta: Any) -> ToolResult:
+    """Return a copy with stable transport metadata while preserving service metadata."""
+
+    return result.model_copy(update={"meta": {**result.meta, **meta}})

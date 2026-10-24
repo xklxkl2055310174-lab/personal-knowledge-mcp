@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.tmp/
 .coverage
 htmlcov/
 .runtime/
@@ -30,8 +31,12 @@ workspace/examples/*
 !workspace/examples/project-overview.md
 !workspace/examples/file-security.md
 !workspace/examples/coding-agent-demo.md
+!workspace/examples/safe-command-demo.py
+!workspace/examples/timeout-demo.py
 !workspace/outputs/
 workspace/outputs/*
 !workspace/outputs/.gitkeep
 
 # 本地直接启动时后端会托管 web/dist，仓库保留已构建的前端产物。
+reports/*.json
+!reports/.gitkeep
