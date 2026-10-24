@@ -1,0 +1,30 @@
+event: step_started
+data: {"event": "step_started", "timestamp": "2026-10-24T12:47:15.336030+00:00", "data": {"step": "queued"}}
+
+event: step_started
+data: {"event": "step_started", "timestamp": "2026-10-24T12:47:15.348200+00:00", "data": {"step": "agent"}}
+
+event: step_finished
+data: {"event": "step_finished", "timestamp": "2026-10-24T12:47:15.753676+00:00", "data": {"step": "intake", "detail": {"query": "MCP 如何连接 Agent 与工具", "strategy": "relevant", "budget": 200}}}
+
+event: tool_call
+data: {"event": "tool_call", "timestamp": "2026-10-24T12:47:15.770611+00:00", "data": {"tool": "search_notes", "detail": {"tool": "search_notes", "arguments": {"query": "MCP 如何连接 Agent 与工具", "top_k": 5}, "hits": 1, "attempts": [{"number": 1, "duration_ms": 11, "outcome": "verified", "category": null, "code": null}], "fallback": null}}}
+
+event: tool_result
+data: {"event": "tool_result", "timestamp": "2026-10-24T12:47:15.770611+00:00", "data": {"tool": "search_notes", "ok": true}}
+
+event: step_finished
+data: {"event": "step_finished", "timestamp": "2026-10-24T12:47:15.770611+00:00", "data": {"step": "search", "detail": {"tool": "search_notes", "arguments": {"query": "MCP 如何连接 Agent 与工具", "top_k": 5}, "hits": 1, "attempts": [{"number": 1, "duration_ms": 11, "outcome": "verified", "category": null, "code": null}], "fallback": null}}}
+
+event: step_finished
+data: {"event": "step_finished", "timestamp": "2026-10-24T12:47:15.786740+00:00", "data": {"step": "context", "detail": {"strategy": "relevant", "original_tokens": 24, "estimated_tokens": 24, "truncated": false, "token_source": "estimate", "summarized": false}}}
+
+event: step_finished
+data: {"event": "step_finished", "timestamp": "2026-10-24T12:47:15.800817+00:00", "data": {"step": "summary", "detail": {"input_tokens": null, "output_tokens": 47, "mode": "local", "provider": "local"}}}
+
+event: step_finished
+data: {"event": "step_finished", "timestamp": "2026-10-24T12:47:15.815537+00:00", "data": {"step": "writeback", "detail": {"success": true, "path": "outputs/2026-10-24-MCP-如何连接-Agent-与工具-ad4d3357.md", "citations_valid": true}}}
+
+event: task_finished
+data: {"event": "task_finished", "timestamp": "2026-10-24T12:47:15.830540+00:00", "data": {"status": "completed"}}
+

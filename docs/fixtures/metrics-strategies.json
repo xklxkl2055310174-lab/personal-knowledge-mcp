@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "data": {
+    "runs": 1,
+    "by_strategy": {
+      "relevant": {
+        "runs": 1,
+        "successes": 1,
+        "input_tokens": 24,
+        "output_tokens": 47,
+        "success_rate": 1.0
+      }
+    }
+  },
+  "error": null
+}

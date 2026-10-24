@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "personal-knowledge": {
+      "command": "uv",
+      "args": ["run", "knowledge-mcp"],
+      "env": {
+        "MCP_TRANSPORT": "stdio",
+        "MCP_WORKSPACE_ROOT": "./workspace",
+        "MCP_REPOSITORY_ROOT": "."
+      }
+    }
+  }
+}

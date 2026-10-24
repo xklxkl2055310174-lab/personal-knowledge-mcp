@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "data": {
+    "items": [
+      {
+        "id": "sample",
+        "path": "sample.json",
+        "size": 35
+      }
+    ]
+  },
+  "error": null
+}

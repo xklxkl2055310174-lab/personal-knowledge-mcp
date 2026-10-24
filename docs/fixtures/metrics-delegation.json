@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "data": {
+    "by_mode": {
+      "delegated": {
+        "runs": 1,
+        "completed": 1
+      }
+    }
+  },
+  "error": null
+}

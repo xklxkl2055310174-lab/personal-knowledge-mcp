@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "data": {
+    "changed_files": 1,
+    "removed_files": 0,
+    "skipped_files": 0,
+    "files": 1,
+    "chunks": 1,
+    "last_indexed_at": "2026-10-24 12:47:15"
+  },
+  "error": null
+}

@@ -1,0 +1,40 @@
+{
+  "ok": true,
+  "data": {
+    "items": [
+      {
+        "id": 2,
+        "task_id": "b880f76ce5d84e4c80ed6453cfbdf233",
+        "step_id": null,
+        "created_at": "2026-10-24T12:47:15.710603+00:00",
+        "tool": "file_access",
+        "arguments_json": "{\"action\": \"write\", \"path\": \"outputs/2026-10-24-MCP-如何连接-Agent-与工具-ad4d3357.md\", \"content\": \"<redacted>\", \"mode\": \"create\", \"expected_sha256\": null, \"old_text\": null, \"new_text\": \"<redacted>\"}",
+        "caller": "agent",
+        "ok": 1,
+        "error_category": null,
+        "error_code": null,
+        "attempts": 1,
+        "duration_ms": 35,
+        "trace_id": "88c38da2f7d34da89721b83c5c105b4c"
+      },
+      {
+        "id": 1,
+        "task_id": "b880f76ce5d84e4c80ed6453cfbdf233",
+        "step_id": null,
+        "created_at": "2026-10-24T12:47:15.366464+00:00",
+        "tool": "search_notes",
+        "arguments_json": "{\"query\": \"MCP 如何连接 Agent 与工具\", \"top_k\": 5}",
+        "caller": "agent",
+        "ok": 1,
+        "error_category": null,
+        "error_code": null,
+        "attempts": 1,
+        "duration_ms": 14,
+        "trace_id": "ba5f0786377c4a38b2a24a9398312398"
+      }
+    ],
+    "limit": 100,
+    "offset": 0
+  },
+  "error": null
+}

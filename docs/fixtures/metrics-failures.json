@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "data": {
+    "hours": 720,
+    "rows": [
+      {
+        "tool": "file_access",
+        "category": "success",
+        "count": 1
+      },
+      {
+        "tool": "search_notes",
+        "category": "success",
+        "count": 1
+      }
+    ]
+  },
+  "error": null
+}

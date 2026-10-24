@@ -1,0 +1,12 @@
+---
+description: Personal Knowledge MCP engineering rules
+alwaysApply: true
+---
+
+- Read AGENTS.md and docs/TOOLS.md before changing a tool.
+- Preserve the five public tool names and backward-compatible fields.
+- Execute tools through MCP Client in Agent code.
+- Never bypass resolve_inside or expose absolute filesystem access.
+- Classify failures before retrying; retry only timeout/transient and only when idempotent.
+- Keep secrets out of source, responses, SQLite traces, fixtures, and logs.
+- Run Ruff, pytest, generated-doc check, and local eval after backend changes.
