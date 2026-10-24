@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -142,3 +143,49 @@ def test_spa_serves_assets_and_history_fallback(client: TestClient) -> None:
     assert "id=app" in client.get("/agent").text
     assert client.get("/api/unknown").status_code == 404
     assert client.get("/health").json()["status"] == "ok"
+
+
+def test_task_history_trace_events_and_metrics(client: TestClient) -> None:
+    created = client.post(
+        "/api/tasks",
+        json={
+            "query": "MCP Agent",
+            "mode": "delegated",
+            "strategy": "relevant",
+            "max_tokens": 200,
+        },
+    ).json()["data"]
+    task_id = created["task_id"]
+    detail = None
+    for _ in range(50):
+        detail = client.get(f"/api/tasks/{task_id}").json()["data"]
+        if detail["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
+    assert detail and detail["status"] == "completed"
+    assert detail["answer"]
+    listing = client.get("/api/tasks", params={"limit": 10, "offset": 0}).json()["data"]
+    assert any(item["id"] == task_id for item in listing["items"])
+    with client.stream("GET", f"/api/tasks/{task_id}/events") as response:
+        body = "".join(response.iter_text())
+    assert "task_finished" in body
+    assert client.get("/api/tool-calls").json()["ok"] is True
+    assert client.get("/api/metrics/failures").json()["ok"] is True
+    assert client.get("/api/metrics/strategies").json()["ok"] is True
+    assert client.get("/api/metrics/delegation").json()["ok"] is True
+
+
+def test_note_index_api_reindexes(client: TestClient) -> None:
+    before = client.get("/api/notes/index").json()["data"]
+    after = client.post("/api/notes/reindex").json()["data"]
+    assert before["files"] >= 0
+    assert after["files"] == 1
+    assert after["chunks"] >= 1
+
+
+def test_eval_report_endpoints_are_backward_safe(client: TestClient) -> None:
+    listing = client.get("/api/eval/reports").json()
+    assert listing["ok"] is True
+    missing = client.get("/api/eval/reports/missing")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "report_not_found"

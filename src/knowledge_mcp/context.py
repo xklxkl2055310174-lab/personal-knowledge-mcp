@@ -27,6 +27,8 @@ class ContextPack:
     estimated_tokens: int
     original_tokens: int
     truncated: bool
+    token_source: str = "estimate"
+    summarized: bool = False
 
 
 class ContextBudgetManager:
@@ -35,14 +37,23 @@ class ContextBudgetManager:
             raise ValueError("max_tokens must be at least 64")
         self.max_tokens = max_tokens
 
-    def pack(self, query: str, chunks: list[str], strategy: Strategy = "relevant") -> ContextPack:
+    def pack(
+        self,
+        query: str,
+        chunks: list[str],
+        strategy: Strategy = "relevant",
+        *,
+        full_documents: list[str] | None = None,
+    ) -> ContextPack:
         original = "\n\n".join(chunks)
         original_tokens = estimate_tokens(original)
-        if strategy == "full" and original_tokens <= self.max_tokens:
-            return ContextPack(original, strategy, original_tokens, original_tokens, False)
-
-        if strategy == "relevant":
-            tokens = {part.casefold() for part in re.findall(r"[\w\u4e00-\u9fff]+", query)}
+        tokens = {part.casefold() for part in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", query)}
+        summarized = False
+        if strategy == "full":
+            source = full_documents or chunks
+            original_tokens = estimate_tokens("\n\n".join(source))
+            candidate = self._fit(source)
+        elif strategy == "relevant":
             ranked = sorted(
                 chunks,
                 key=lambda chunk: sum(chunk.casefold().count(token) for token in tokens),
@@ -50,13 +61,41 @@ class ContextBudgetManager:
             )
             candidate = self._fit(ranked)
         elif strategy == "summary":
-            lines = [line.strip() for line in original.splitlines() if line.strip()]
-            candidate = self._fit([f"- {line[:220]}" for line in lines[:20]])
+            ranked = sorted(
+                chunks,
+                key=lambda chunk: sum(chunk.casefold().count(token) for token in tokens),
+                reverse=True,
+            )
+            condensed = [self._extractive_summary(chunk, tokens) for chunk in ranked]
+            candidate = self._fit(condensed)
+            summarized = any(a != b for a, b in zip(condensed, ranked, strict=True))
         else:
-            candidate = self._fit(chunks)
+            raise ValueError("strategy must be full, relevant, or summary")
 
         used = estimate_tokens(candidate)
-        return ContextPack(candidate, strategy, used, original_tokens, used < original_tokens)
+        return ContextPack(
+            candidate,
+            strategy,
+            used,
+            original_tokens,
+            used < original_tokens,
+            "estimate",
+            summarized,
+        )
+
+    @staticmethod
+    def _extractive_summary(chunk: str, tokens: set[str]) -> str:
+        if estimate_tokens(chunk) <= 180:
+            return chunk
+        lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+        source = lines[0] if lines else ""
+        ranked = sorted(
+            lines[1:],
+            key=lambda line: sum(line.casefold().count(token) for token in tokens),
+            reverse=True,
+        )
+        selected = ranked[:4]
+        return "\n".join([source, *selected])[:900]
 
     def _fit(self, chunks: list[str]) -> str:
         selected: list[str] = []
@@ -80,19 +119,37 @@ class RunMetric:
     output_tokens: int
     success: bool
     timestamp: str
+    mode: str = "delegated"
+    token_source: str = "estimate"
 
 
 class MetricsRecorder:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def record(self, strategy: Strategy, context: ContextPack, output: str, success: bool) -> None:
+    def record(
+        self,
+        strategy: Strategy,
+        context: ContextPack,
+        output: str,
+        success: bool,
+        *,
+        mode: str = "delegated",
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
         metric = RunMetric(
             strategy=strategy,
-            input_tokens=context.estimated_tokens,
-            output_tokens=estimate_tokens(output),
+            input_tokens=input_tokens or context.estimated_tokens,
+            output_tokens=output_tokens or estimate_tokens(output),
             success=success,
             timestamp=datetime.now(UTC).isoformat(),
+            mode=mode,
+            token_source=(
+                "provider_usage"
+                if input_tokens is not None or output_tokens is not None
+                else context.token_source
+            ),
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:

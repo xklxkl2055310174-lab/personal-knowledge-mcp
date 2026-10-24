@@ -1,0 +1,30 @@
+{"id":"qa-01","kind":"qa","query":"上下文预算怎么控制？","expected_terms":["预算","裁剪","相关"],"references":["context-management.md"],"threshold":0.6}
+{"id":"qa-02","kind":"qa","query":"为什么要做失败分类？","expected_terms":["参数","权限","重试"],"references":["error-taxonomy.md"],"threshold":0.6}
+{"id":"qa-03","kind":"qa","query":"子Agent委派有什么好处？","expected_terms":["检索","总结","权限"],"references":["long-agent-engineering-course.md"],"threshold":0.6}
+{"id":"qa-04","kind":"qa","query":"BM25 为什么适合做关键词检索基线？","expected_terms":["词频","逆文档频率","稀疏"],"references":["bm25-retrieval.md"],"threshold":0.6}
+{"id":"qa-05","kind":"qa","query":"向量检索与BM25怎样组合？","expected_terms":["Embedding","混合","重排"],"references":["embedding-and-rerank.md"],"threshold":0.6}
+{"id":"qa-06","kind":"qa","query":"MCP工具契约应该包含什么？","expected_terms":["参数","返回","失败"],"references":["tool-contract.md"],"threshold":0.6}
+{"id":"qa-07","kind":"qa","query":"如何验证回答中的引用？","expected_terms":["路径","行号","证据"],"references":["citation-validation.md"],"threshold":0.6}
+{"id":"qa-08","kind":"qa","query":"为什么本地命令执行不算强沙箱？","expected_terms":["权限","隔离","Docker"],"references":["command-security.md"],"threshold":0.6}
+{"id":"qa-09","kind":"qa","query":"Docker沙箱应该限制哪些资源？","expected_terms":["网络","内存","进程"],"references":["docker-isolation.md"],"threshold":0.6}
+{"id":"qa-10","kind":"qa","query":"GitHub 403 如何区分限流和无权限？","expected_terms":["X-RateLimit-Remaining","限流","权限"],"references":["github-actions-ci.md"],"threshold":0.6}
+{"id":"qa-11","kind":"qa","query":"Agent Trace 的层级是什么？","expected_terms":["task","step","tool_call"],"references":["observability-tracing.md"],"threshold":0.6}
+{"id":"qa-12","kind":"qa","query":"stdio和Streamable HTTP有什么区别？","expected_terms":["子进程","端口","Host"],"references":["mcp-stdio.md","mcp-http.md"],"threshold":0.5}
+{"id":"qa-13","kind":"qa","query":"指数退避为什么还需要抖动和总截止时间？","expected_terms":["惊群","deadline","重试"],"references":["backoff-and-deadline.md"],"threshold":0.6}
+{"id":"qa-14","kind":"qa","query":"asyncio超时为什么不一定能停止线程？","expected_terms":["取消","线程","子进程"],"references":["long-python-asyncio-course.md"],"threshold":0.6}
+{"id":"qa-15","kind":"qa","query":"RAG成功为什么不能定义为检索结果非空？","expected_terms":["要点","引用","无关"],"references":["long-rag-evaluation-course.md"],"threshold":0.6}
+{"id":"tool-01","kind":"tool","tool":"search_notes","arguments":{"query":"失败分类","top_k":5},"expect_ok":true}
+{"id":"tool-02","kind":"tool","tool":"search_notes","arguments":{"query":"","top_k":5},"expect_ok":false,"expect_category":"parameter"}
+{"id":"tool-03","kind":"tool","tool":"file_access","arguments":{"action":"list","path":"examples"},"expect_ok":true}
+{"id":"tool-04","kind":"tool","tool":"file_access","arguments":{"action":"read","path":"examples/project-overview.md"},"expect_ok":true}
+{"id":"tool-05","kind":"tool","tool":"file_access","arguments":{"action":"read","path":"../pyproject.toml"},"expect_ok":false,"expect_category":"permission"}
+{"id":"tool-06","kind":"tool","tool":"file_access","arguments":{"action":"read","path":"C:/Windows/win.ini"},"expect_ok":false,"expect_category":"permission"}
+{"id":"tool-07","kind":"tool","tool":"file_access","arguments":{"action":"write","path":"eval/write.md","content":"eval","mode":"create"},"expect_ok":true}
+{"id":"tool-08","kind":"tool","tool":"git_query","arguments":{"operation":"status","repo_path":".","limit":10},"expect_ok":true}
+{"id":"tool-09","kind":"tool","tool":"git_query","arguments":{"operation":"branch","repo_path":".","limit":10},"expect_ok":true}
+{"id":"tool-10","kind":"tool","tool":"git_query","arguments":{"operation":"log","repo_path":".","limit":3},"expect_ok":true}
+{"id":"tool-11","kind":"tool","tool":"ci_status","arguments":{"source":"local","limit":5},"expect_ok":true}
+{"id":"tool-12","kind":"tool","tool":"run_command","arguments":{"command":["python","safe-command-demo.py"],"cwd":"examples"},"expect_ok":true}
+{"id":"tool-13","kind":"tool","tool":"run_command","arguments":{"command":["python","-c","print(1)"],"cwd":"."},"expect_ok":false,"expect_category":"permission"}
+{"id":"tool-14","kind":"tool","tool":"run_command","arguments":{"command":["git","commit","-m","no"],"cwd":"."},"expect_ok":false,"expect_category":"permission"}
+{"id":"tool-15","kind":"tool","tool":"run_command","arguments":{"command":["python","timeout-demo.py"],"cwd":"examples","timeout_seconds":0.1},"expect_ok":false,"expect_category":"timeout"}

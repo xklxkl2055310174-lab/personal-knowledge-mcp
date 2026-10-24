@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -225,12 +226,42 @@ class ProviderConfig:
             "model": self.model,
             "base_url": self.base_url,
             "protocol": self.protocol,
+            "supports_tools": self.protocol in {"openai", "anthropic", "azure"},
         }
+
+    @classmethod
+    def from_environment(cls) -> ProviderConfig | None:
+        provider = os.getenv("LLM_PROVIDER", "").strip()
+        if not provider:
+            return None
+        return cls.from_payload(
+            {
+                "id": provider,
+                "model": os.getenv("LLM_MODEL", ""),
+                "base_url": os.getenv("LLM_BASE_URL", ""),
+                "api_key": os.getenv("LLM_API_KEY", ""),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class Completion:
     text: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTurn:
+    text: str
+    tool_calls: tuple[ToolCall, ...] = ()
     input_tokens: int | None = None
     output_tokens: int | None = None
 
@@ -255,6 +286,149 @@ class ProviderClient:
         if not context.strip():
             return Completion(f"没有在知识库中找到与“{query}”相关的内容。")
         return await asyncio.to_thread(self._request, query, context)
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> ModelTurn:
+        if self.config.protocol not in {"openai", "anthropic", "azure"}:
+            raise ProviderError("当前供应商协议不支持工具调用")
+        return await asyncio.to_thread(self._chat_request, messages, tools)
+
+    def _chat_request(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> ModelTurn:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.config.protocol == "anthropic":
+            headers.update(
+                {
+                    "x-api-key": self.config.api_key,
+                    "anthropic-version": "2023-06-01",
+                }
+            )
+            body = {
+                "model": self.config.model,
+                "max_tokens": 1200,
+                "system": SYSTEM_PROMPT,
+                "messages": self._anthropic_messages(messages),
+                "tools": [
+                    {
+                        "name": item["function"]["name"],
+                        "description": item["function"].get("description", ""),
+                        "input_schema": item["function"]["parameters"],
+                    }
+                    for item in tools
+                ],
+            }
+            url = f"{self.config.base_url}/v1/messages"
+        else:
+            if self.config.protocol == "azure":
+                deployment = quote(self.config.model, safe="-._")
+                version = quote(self.config.api_version, safe="-._")
+                url = (
+                    f"{self.config.base_url}/openai/deployments/{deployment}/chat/completions"
+                    f"?api-version={version}"
+                )
+                headers["api-key"] = self.config.api_key
+                body = {"messages": messages, "tools": tools}
+            else:
+                url = f"{self.config.base_url}/chat/completions"
+                if self.config.api_key:
+                    headers["Authorization"] = f"Bearer {self.config.api_key}"
+                body = {
+                    "model": self.config.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "stream": False,
+                }
+        request = self._json_request(url, body, headers)
+        try:
+            with self.urlopen(request, timeout=self.config.timeout_seconds) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as exc:
+            raise ProviderError(
+                f"模型服务返回 HTTP {exc.code}：{self._http_error_message(exc)}"
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ProviderError(f"无法连接模型服务：{type(exc).__name__}") from None
+        try:
+            return self._parse_turn(payload)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise ProviderError("模型工具调用响应无法解析") from None
+
+    @staticmethod
+    def _anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role")
+            if role == "system":
+                continue
+            if role == "assistant":
+                content: list[dict[str, Any]] = []
+                if message.get("content"):
+                    content.append({"type": "text", "text": message["content"]})
+                for call in message.get("tool_calls") or []:
+                    raw = call["function"].get("arguments") or "{}"
+                    arguments = json.loads(raw) if isinstance(raw, str) else raw
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": call["id"],
+                            "name": call["function"]["name"],
+                            "input": arguments,
+                        }
+                    )
+                converted.append({"role": "assistant", "content": content})
+            elif role == "tool":
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": message["tool_call_id"],
+                                "content": message.get("content", ""),
+                            }
+                        ],
+                    }
+                )
+            else:
+                converted.append({"role": "user", "content": str(message.get("content") or "")})
+        return converted
+
+    def _parse_turn(self, payload: dict[str, Any]) -> ModelTurn:
+        usage = payload.get("usage") or {}
+        if self.config.protocol == "anthropic":
+            blocks = payload.get("content") or []
+            text = "".join(
+                str(block.get("text") or "") for block in blocks if block.get("type") == "text"
+            )
+            calls = tuple(
+                ToolCall(str(block["id"]), str(block["name"]), dict(block.get("input") or {}))
+                for block in blocks
+                if block.get("type") == "tool_use"
+            )
+            return ModelTurn(
+                text,
+                calls,
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+            )
+        message = payload["choices"][0]["message"]
+        calls = []
+        for item in message.get("tool_calls") or []:
+            raw = item["function"].get("arguments") or "{}"
+            arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            calls.append(ToolCall(str(item["id"]), str(item["function"]["name"]), arguments))
+        return ModelTurn(
+            str(message.get("content") or ""),
+            tuple(calls),
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+        )
 
     def _request(self, query: str, context: str) -> Completion:
         if self.config.protocol == "anthropic":
@@ -302,9 +476,7 @@ class ProviderClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        return self._json_request(
-            f"{self.config.base_url}/chat/completions", body, headers
-        )
+        return self._json_request(f"{self.config.base_url}/chat/completions", body, headers)
 
     def _anthropic_request(self, query: str, context: str) -> urllib.request.Request:
         body = {
@@ -427,4 +599,10 @@ class ProviderClient:
 def provider_catalog() -> list[dict[str, Any]]:
     """Return a JSON-safe copy of provider metadata without secrets."""
 
-    return [dict(item) for item in PROVIDERS]
+    return [
+        {
+            **item,
+            "supports_tools": item["protocol"] in {"openai", "anthropic", "azure"},
+        }
+        for item in PROVIDERS
+    ]

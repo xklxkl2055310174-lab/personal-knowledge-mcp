@@ -18,8 +18,10 @@ The Agent still reaches tools through an MCP ``Client`` (in-memory transport), s
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -29,14 +31,27 @@ from typing import Any
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from starlette.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 
-from .agent import AgentTrace, KnowledgeAgent, ProviderSummaryAgent, SummaryAgent
+from .agent import (
+    AgentTrace,
+    KnowledgeAgent,
+    ProviderSummaryAgent,
+    SummaryAgent,
+    ToolCallingAgent,
+)
 from .config import Settings
 from .context import ContextBudgetManager, MetricsRecorder
+from .index import TEXT_SUFFIXES, NoteIndex
 from .providers import ProviderClient, ProviderConfig, ProviderError, provider_catalog
 from .security import SecurityViolation, resolve_inside
-from .services import TEXT_SUFFIXES
+from .telemetry import TraceStore, trace_scope
 
 STRATEGIES = ("full", "relevant", "summary")
 DEFAULT_BUDGET = 800
@@ -88,6 +103,8 @@ def _parse_query_and_budget(body: dict[str, Any]) -> tuple[str, int] | JSONRespo
 
 def _parse_provider(body: dict[str, Any]) -> ProviderConfig | JSONResponse | None:
     try:
+        if "provider" not in body:
+            return ProviderConfig.from_environment()
         return ProviderConfig.from_payload(body.get("provider"))
     except ProviderError as exc:
         return _fail("invalid_provider", str(exc))
@@ -108,16 +125,76 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
     dist_root = Path(
         os.getenv("MCP_WEB_DIST", str(settings.project_root / "web" / "dist"))
     ).resolve()
+    traces_store = TraceStore(settings.runtime_root / "traces.sqlite3")
+    note_index = NoteIndex(
+        notes_root,
+        settings.runtime_root / "notes-index.sqlite3",
+        settings.max_file_bytes,
+    )
+    background_tasks: dict[str, asyncio.Task[None]] = {}
+    task_events: dict[str, list[dict[str, Any]]] = {}
+
+    def emit(task_id: str, event: str, **data: Any) -> None:
+        task_events.setdefault(task_id, []).append(
+            {
+                "event": event,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "data": data,
+            }
+        )
 
     async def run_strategies(
         query: str,
         budget: int,
         strategies: tuple[str, ...],
         provider: ProviderConfig | None,
+        mode: str = "delegated",
+        task_id: str | None = None,
     ) -> list[dict]:
         traces: list[dict[str, Any]] = []
         # In-memory MCP client: same JSON-RPC protocol as /mcp, without a network hop.
         async with Client(server) as client:
+            if mode == "single" and provider:
+                single = ToolCallingAgent(
+                    client,
+                    ProviderClient(provider),
+                    ContextBudgetManager(budget),
+                )
+                with trace_scope("agent", task_id):
+                    output = await single.run(query)
+                return [
+                    {
+                        "query": query,
+                        "strategy": strategies[0],
+                        "mode": "single",
+                        "answer": output.text,
+                        "success": True,
+                        "evidence": [],
+                        "context": {
+                            "text": "",
+                            "strategy": strategies[0],
+                            "estimated_tokens": output.input_tokens or 0,
+                            "original_tokens": output.input_tokens or 0,
+                            "truncated": False,
+                            "token_source": (
+                                "provider_usage" if output.input_tokens is not None else "estimate"
+                            ),
+                            "summarized": False,
+                            "saved_ratio": 0.0,
+                        },
+                        "steps": [
+                            {
+                                "name": "agent_loop",
+                                "title": "单 Agent 工具调用循环",
+                                "duration_ms": 0,
+                                "detail": output.detail,
+                            }
+                        ],
+                        "total_ms": 0,
+                        "citations_valid": True,
+                        "output_path": None,
+                    }
+                ]
             summary_agent = (
                 ProviderSummaryAgent(ProviderClient(provider)) if provider else SummaryAgent()
             )
@@ -128,13 +205,24 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
                 summary_agent,
             )
             for strategy in strategies:
-                trace = await agent.answer_with_trace(query, strategy)  # type: ignore[arg-type]
+                with trace_scope("agent", task_id):
+                    trace = await agent.answer_with_trace(
+                        query,
+                        strategy,
+                        mode=mode,  # type: ignore[arg-type]
+                    )
                 traces.append(_trace_to_dict(trace))
         return traces
 
     @server.custom_route("/api/providers", ["GET"])
     async def providers(_: Request) -> JSONResponse:
-        return _ok({"providers": provider_catalog(), "secret_storage": "memory-only"})
+        return _ok(
+            {
+                "providers": provider_catalog(),
+                "secret_storage": "request-memory-or-server-environment",
+                "server_provider_configured": ProviderConfig.from_environment() is not None,
+            }
+        )
 
     @server.custom_route("/api/provider/test", ["POST"])
     async def provider_test(request: Request) -> JSONResponse:
@@ -200,8 +288,11 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         strategy = str(body.get("strategy") or "relevant")
         if strategy not in STRATEGIES:
             return _fail("invalid_strategy", "strategy 必须是 full / relevant / summary")
+        mode = str(body.get("mode") or "delegated")
+        if mode not in {"single", "delegated"}:
+            return _fail("invalid_mode", "mode 必须是 single / delegated")
         try:
-            [trace] = await run_strategies(*parsed, (strategy,), provider)
+            [trace] = await run_strategies(*parsed, (strategy,), provider, mode)
         except ProviderError as exc:
             return _fail("provider_failed", str(exc), 502)
         except RuntimeError as exc:  # search_notes returned ok=false
@@ -218,7 +309,7 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         if isinstance(provider, JSONResponse):
             return provider
         try:
-            traces = await run_strategies(*parsed, STRATEGIES, provider)
+            traces = await run_strategies(*parsed, STRATEGIES, provider, "delegated")
         except ProviderError as exc:
             return _fail("provider_failed", str(exc), 502)
         except RuntimeError as exc:
@@ -274,6 +365,222 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         except UnicodeError:
             return _fail("not_text", "仅支持 UTF-8 文本", 415)
         return _ok({"path": relative, "content": content})
+
+    async def execute_task(
+        task_id: str,
+        query: str,
+        mode: str,
+        strategy: str,
+        budget: int,
+        provider: ProviderConfig | None,
+    ) -> None:
+        traces_store.update_task(task_id, status="running")
+        emit(task_id, "step_started", step="agent")
+        try:
+            [trace] = await run_strategies(query, budget, (strategy,), provider, mode, task_id)
+            for step in trace.get("steps", []):
+                traces_store.record_step(
+                    task_id,
+                    step["name"],
+                    step.get("duration_ms", 0),
+                    step.get("detail", {}),
+                )
+                if step["name"] == "search":
+                    emit(task_id, "tool_call", tool="search_notes", detail=step["detail"])
+                    emit(task_id, "tool_result", tool="search_notes", ok=True)
+                    attempts = step["detail"].get("attempts", [])
+                    for attempt in attempts[1:]:
+                        emit(task_id, "retry", tool="search_notes", attempt=attempt)
+                    if step["detail"].get("fallback"):
+                        emit(
+                            task_id,
+                            "fallback",
+                            tool="search_notes",
+                            fallback=step["detail"]["fallback"],
+                        )
+                emit(task_id, "step_finished", step=step["name"], detail=step["detail"])
+            summary = next(
+                (
+                    step.get("detail", {})
+                    for step in reversed(trace.get("steps", []))
+                    if step.get("name") in {"summary", "agent_loop"}
+                ),
+                {},
+            )
+            if summary.get("input_tokens") is not None:
+                emit(
+                    task_id,
+                    "llm_usage",
+                    input_tokens=summary.get("input_tokens"),
+                    output_tokens=summary.get("output_tokens"),
+                )
+            traces_store.update_task(
+                task_id,
+                status="completed",
+                answer=trace["answer"],
+                metrics_json=json.dumps(trace, ensure_ascii=False),
+            )
+            emit(task_id, "task_finished", status="completed")
+        except asyncio.CancelledError:
+            traces_store.update_task(task_id, status="cancelled")
+            emit(task_id, "task_finished", status="cancelled")
+            raise
+        except Exception as exc:  # noqa: BLE001 - boundary converts to safe API error
+            error = {"code": "task_failed", "message": str(exc)[:500]}
+            traces_store.update_task(
+                task_id,
+                status="failed",
+                error_json=json.dumps(error, ensure_ascii=False),
+            )
+            emit(task_id, "error", **error)
+
+    @server.custom_route("/api/tasks", ["POST", "GET"])
+    async def tasks(request: Request) -> JSONResponse:
+        if request.method == "GET":
+            try:
+                limit = int(request.query_params.get("limit", "20"))
+                offset = int(request.query_params.get("offset", "0"))
+            except ValueError:
+                return _fail("invalid_pagination", "limit/offset 必须是整数")
+            return _ok(
+                {
+                    "items": traces_store.list_tasks(limit, offset),
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        body = await _body(request)
+        parsed = _parse_query_and_budget(body)
+        if isinstance(parsed, JSONResponse):
+            return parsed
+        provider = _parse_provider(body)
+        if isinstance(provider, JSONResponse):
+            return provider
+        mode = str(body.get("mode") or "delegated")
+        strategy = str(body.get("strategy") or "relevant")
+        if mode not in {"single", "delegated"}:
+            return _fail("invalid_mode", "mode 必须是 single / delegated")
+        if strategy not in STRATEGIES:
+            return _fail("invalid_strategy", "strategy 必须是 full / relevant / summary")
+        task_id = traces_store.create_task(parsed[0], mode, strategy)
+        emit(task_id, "step_started", step="queued")
+        background_tasks[task_id] = asyncio.create_task(
+            execute_task(task_id, parsed[0], mode, strategy, parsed[1], provider)
+        )
+        return _ok({"task_id": task_id, "status": "queued"})
+
+    @server.custom_route("/api/tasks/{task_id}", ["GET"])
+    async def task_detail(request: Request) -> JSONResponse:
+        task = traces_store.get_task(request.path_params["task_id"])
+        return _ok(task) if task else _fail("task_not_found", "任务不存在", 404)
+
+    @server.custom_route("/api/tasks/{task_id}/cancel", ["POST"])
+    async def task_cancel(request: Request) -> JSONResponse:
+        task_id = request.path_params["task_id"]
+        task = traces_store.get_task(task_id)
+        if not task:
+            return _fail("task_not_found", "任务不存在", 404)
+        traces_store.update_task(task_id, cancel_requested=1)
+        running = background_tasks.get(task_id)
+        if running and not running.done():
+            running.cancel()
+        return _ok({"task_id": task_id, "status": "cancelling"})
+
+    @server.custom_route("/api/tasks/{task_id}/events", ["GET"])
+    async def task_event_stream(request: Request) -> StreamingResponse:
+        task_id = request.path_params["task_id"]
+
+        async def stream() -> Any:
+            cursor = 0
+            while True:
+                events = task_events.get(task_id, [])
+                while cursor < len(events):
+                    item = events[cursor]
+                    cursor += 1
+                    yield (
+                        f"event: {item['event']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    )
+                    if item["event"] in {"task_finished", "error"}:
+                        return
+                task = traces_store.get_task(task_id)
+                if not task or task["status"] in {"completed", "failed", "cancelled"}:
+                    return
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.1)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @server.custom_route("/api/tool-calls", ["GET"])
+    async def tool_calls(request: Request) -> JSONResponse:
+        params = request.query_params
+        try:
+            limit = int(params.get("limit", "100"))
+            offset = int(params.get("offset", "0"))
+        except ValueError:
+            return _fail("invalid_pagination", "limit/offset 必须是整数")
+        items = traces_store.list_tool_calls(
+            tool=params.get("tool"),
+            category=params.get("category"),
+            caller=params.get("caller"),
+            since=params.get("since"),
+            limit=limit,
+            offset=offset,
+        )
+        return _ok({"items": items, "limit": limit, "offset": offset})
+
+    @server.custom_route("/api/metrics/failures", ["GET"])
+    async def failure_metrics(request: Request) -> JSONResponse:
+        try:
+            hours = int(request.query_params.get("hours", str(24 * 30)))
+        except ValueError:
+            return _fail("invalid_hours", "hours 必须是整数")
+        return _ok({"hours": hours, "rows": traces_store.failure_distribution(hours)})
+
+    @server.custom_route("/api/metrics/strategies", ["GET"])
+    async def strategy_metrics(_: Request) -> JSONResponse:
+        return _ok(metrics.summarize())
+
+    @server.custom_route("/api/metrics/delegation", ["GET"])
+    async def delegation_metrics(_: Request) -> JSONResponse:
+        rows = traces_store.list_tasks(100, 0)
+        grouped: dict[str, dict[str, int]] = {}
+        for row in rows:
+            item = grouped.setdefault(row["mode"], {"runs": 0, "completed": 0})
+            item["runs"] += 1
+            item["completed"] += int(row["status"] == "completed")
+        return _ok({"by_mode": grouped})
+
+    @server.custom_route("/api/notes/index", ["GET"])
+    async def index_status(_: Request) -> JSONResponse:
+        return _ok(note_index.status())
+
+    @server.custom_route("/api/notes/reindex", ["POST"])
+    async def reindex(_: Request) -> JSONResponse:
+        return _ok({**note_index.sync(), **note_index.status()})
+
+    @server.custom_route("/api/eval/reports", ["GET"])
+    async def eval_reports(_: Request) -> JSONResponse:
+        report_root = settings.project_root / "reports"
+        items = (
+            [
+                {"id": path.stem, "path": path.name, "size": path.stat().st_size}
+                for path in sorted(report_root.glob("*.json"), reverse=True)
+            ]
+            if report_root.exists()
+            else []
+        )
+        return _ok({"items": items})
+
+    @server.custom_route("/api/eval/reports/{report_id}", ["GET"])
+    async def eval_report(request: Request) -> JSONResponse:
+        report_id = request.path_params["report_id"]
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", report_id):
+            return _fail("invalid_report_id", "报告 ID 非法")
+        target = settings.project_root / "reports" / f"{report_id}.json"
+        if not target.is_file():
+            return _fail("report_not_found", "报告不存在", 404)
+        return _ok(json.loads(target.read_text(encoding="utf-8")))
 
     @server.custom_route("/{path:path}", ["GET"], include_in_schema=False)
     async def spa(request: Request) -> Response:

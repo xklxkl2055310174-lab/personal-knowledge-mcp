@@ -28,3 +28,19 @@ def test_metrics_compare_strategies(tmp_path: Path) -> None:
     assert summary["runs"] == 1
     assert summary["by_strategy"]["relevant"]["success_rate"] == 1
     assert estimate_tokens("abcd") == 1
+
+
+def test_context_strategies_use_distinct_sources() -> None:
+    manager = ContextBudgetManager(200)
+    chunks = [
+        "a.md:2 | relevant evidence\n" + "\n".join(f"details line {index}" for index in range(100)),
+        "b.md:3 | unrelated\n" + "\n".join(f"noise line {index}" for index in range(100)),
+    ]
+    documents = ["a.md:1 | complete document " + "full " * 100]
+    full = manager.pack("relevant evidence", chunks, "full", full_documents=documents)
+    relevant = manager.pack("relevant evidence", chunks, "relevant", full_documents=documents)
+    summary = manager.pack("relevant evidence", chunks, "summary", full_documents=documents)
+    assert "complete document" in full.text
+    assert "relevant evidence" in relevant.text
+    assert summary.summarized is True
+    assert len({full.text, relevant.text, summary.text}) == 3
