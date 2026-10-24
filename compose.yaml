@@ -10,6 +10,12 @@ services:
       MCP_REPOSITORY_ROOT: /app
       MCP_RUNTIME_ROOT: /app/.runtime
       MCP_ALLOWED_COMMANDS: python,python3,git,rg
+      MCP_COMMAND_OUTPUT_BYTES: 20000
+      MCP_SANDBOX: local
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     ports:
       - "127.0.0.1:8000:8000"

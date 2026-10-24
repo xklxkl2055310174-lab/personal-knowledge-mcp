@@ -16,6 +16,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MCP_WORKSPACE_ROOT=/app/workspace \
     MCP_REPOSITORY_ROOT=/app \
     MCP_RUNTIME_ROOT=/app/.runtime \
+    MCP_SANDBOX=local \
+    MCP_COMMAND_OUTPUT_BYTES=20000 \
     MCP_WEB_DIST=/app/web/dist
 
 RUN apt-get update \
@@ -27,12 +29,14 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY knowledge ./knowledge
 COPY workspace ./workspace
+COPY eval ./eval
+COPY docs ./docs
 COPY --from=web /web/dist ./web/dist
 RUN pip install --no-cache-dir .
 
 RUN useradd --create-home --uid 10001 mcp \
     && mkdir -p /app/.runtime \
-    && chown -R mcp:mcp /app/knowledge /app/workspace /app/.runtime
+    && chown -R mcp:mcp /app/knowledge /app/workspace /app/.runtime /app/docs
 USER mcp
 
 EXPOSE 8000

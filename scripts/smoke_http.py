@@ -43,7 +43,11 @@ async def run(url: str) -> None:
             "ci_status": structured(await client.call_tool("ci_status", {"source": "local"})),
             "run_command": structured(
                 await client.call_tool(
-                    "run_command", {"command": ["python", "-c", "print('MCP command OK')"]}
+                    "run_command",
+                    {
+                        "command": ["python", "safe-command-demo.py"],
+                        "cwd": "examples",
+                    },
                 )
             ),
         }

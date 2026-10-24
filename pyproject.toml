@@ -22,6 +22,7 @@ dev = [
 [project.scripts]
 knowledge-mcp = "knowledge_mcp.server:main"
 knowledge-mcp-demo = "knowledge_mcp.demo:main"
+knowledge-mcp-eval = "knowledge_mcp.evaluation:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/knowledge_mcp"]
@@ -30,6 +31,9 @@ packages = ["src/knowledge_mcp"]
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "docker: requires a working Docker daemon",
+]
 
 [tool.ruff]
 line-length = 100
