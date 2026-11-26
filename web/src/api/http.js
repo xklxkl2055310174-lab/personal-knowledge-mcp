@@ -20,12 +20,21 @@ export const api = {
   overview: () => request('/overview'),
   ask: payload => request('/agent/ask', { method: 'POST', body: JSON.stringify(payload) }),
   compare: payload => request('/agent/compare', { method: 'POST', body: JSON.stringify(payload) }),
+  conversation: id => request(`/conversations/${encodeURIComponent(id)}`),
+  clearConversation: id => request(`/conversations/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  }),
   metrics: () => request('/agent/metrics'),
   providers: () => request('/providers'),
   testProvider: provider => request('/provider/test', {
     method: 'POST',
     body: JSON.stringify({ provider })
   }),
+  saveProvider: provider => request('/provider/save', {
+    method: 'POST',
+    body: JSON.stringify({ provider })
+  }),
+  deleteSavedProvider: () => request('/provider/saved', { method: 'DELETE' }),
   notes: () => request('/notes'),
   note: path => request(`/notes/content?path=${encodeURIComponent(path)}`)
 }

@@ -303,6 +303,11 @@ class ProviderClient:
     ) -> ModelTurn:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.config.protocol == "anthropic":
+            system_prompt = "\n\n".join(
+                str(message.get("content") or "")
+                for message in messages
+                if message.get("role") == "system"
+            ).strip()
             headers.update(
                 {
                     "x-api-key": self.config.api_key,
@@ -312,7 +317,7 @@ class ProviderClient:
             body = {
                 "model": self.config.model,
                 "max_tokens": 1200,
-                "system": SYSTEM_PROMPT,
+                "system": system_prompt or SYSTEM_PROMPT,
                 "messages": self._anthropic_messages(messages),
                 "tools": [
                     {

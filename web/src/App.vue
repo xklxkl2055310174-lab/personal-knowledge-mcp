@@ -73,12 +73,16 @@
               API Key
               <div class="secret-row">
                 <input v-model.trim="form.api_key" :type="showKey ? 'text' : 'password'"
-                       placeholder="仅保存在当前页面内存" autocomplete="off" />
+                       :placeholder="providerState.saved ? '已使用 Windows DPAPI 安全保存' : '输入一次后可安全保存到本机'"
+                       autocomplete="off" />
                 <button class="secondary show-key" type="button" @click="showKey = !showKey">
                   {{ showKey ? '隐藏' : '显示' }}
                 </button>
               </div>
             </label>
+            <p v-if="providerState.saved" class="muted small">
+              API Key 已由当前 Windows 用户加密保存；留空即可继续使用。更改供应商或模型时请重新输入。
+            </p>
             <label v-if="form.id === 'azure-openai'" class="field">
               API Version
               <input v-model.trim="form.api_version" class="mono" placeholder="2024-10-21" />
@@ -95,6 +99,9 @@
         </div>
 
         <div class="dialog-actions">
+          <button v-if="providerState.saved" class="ghost" type="button" :disabled="saving" @click="forgetProvider">
+            删除已保存配置
+          </button>
           <button v-if="providerState.configured" class="ghost" type="button" @click="useLocal">
             切回本地模式
           </button>
@@ -103,7 +110,9 @@
           <button class="secondary" type="button" :disabled="testing" @click="testConnection">
             {{ testing ? '测试中…' : '测试连接' }}
           </button>
-          <button type="button" @click="saveProvider">保存配置</button>
+          <button type="button" :disabled="saving" @click="saveProvider">
+            {{ saving ? '保存中…' : '安全保存到本机' }}
+          </button>
         </div>
       </section>
     </div>
@@ -132,6 +141,7 @@ const providers = ref([
 const providerDialog = ref(false)
 const providerError = ref('')
 const testing = ref(false)
+const saving = ref(false)
 const showKey = ref(false)
 const testResult = ref(null)
 const form = reactive({
@@ -155,7 +165,11 @@ const ping = async () => {
 const loadProviders = async () => {
   if (providers.value.length > 1) return
   try {
-    providers.value = (await api.providers()).providers
+    const data = await api.providers()
+    providers.value = data.providers
+    if (data.saved_provider && !providerState.configured) {
+      setProvider({ ...data.saved_provider, api_key: '' })
+    }
   } catch (e) {
     providerError.value = `无法读取供应商列表：${e.message}`
   }
@@ -188,13 +202,23 @@ const applyPreset = () => {
   providerError.value = ''
 }
 
-const validateProvider = () => {
+const savedFormMatches = () => (
+  providerState.saved &&
+  form.id === providerState.id &&
+  form.model === providerState.model &&
+  form.base_url === providerState.base_url &&
+  form.api_version === providerState.api_version
+)
+
+const validateProvider = (allowSaved = false) => {
   const item = selectedProvider.value
   if (!item) throw new Error('请选择模型供应商')
   if (form.id === 'local') return item
   if (!form.model) throw new Error('请填写模型名称')
   if (!form.base_url) throw new Error('请填写 Base URL')
-  if (item.requires_key && !form.api_key) throw new Error('请填写 API Key')
+  if (item.requires_key && !form.api_key && !(allowSaved && savedFormMatches())) {
+    throw new Error('请填写 API Key')
+  }
   return item
 }
 
@@ -210,9 +234,11 @@ const testConnection = async () => {
   providerError.value = ''
   testResult.value = null
   try {
-    validateProvider()
+    validateProvider(true)
     testing.value = true
-    const result = await api.testProvider(payload())
+    const result = await api.testProvider(
+      savedFormMatches() && !form.api_key ? { use_saved: true } : payload()
+    )
     const latency = result.latency_ms != null ? ` · ${result.latency_ms} ms` : ''
     testResult.value = { ok: true, message: `${result.preview}${latency}` }
   } catch (e) {
@@ -222,15 +248,39 @@ const testConnection = async () => {
   }
 }
 
-const saveProvider = () => {
+const saveProvider = async () => {
   providerError.value = ''
   try {
-    const item = validateProvider()
-    if (form.id === 'local') resetProvider()
-    else setProvider({ ...payload(), label: item.label })
+    const item = validateProvider(true)
+    if (form.id === 'local') {
+      resetProvider()
+    } else if (savedFormMatches() && !form.api_key) {
+      closeProviderDialog()
+      return
+    } else {
+      saving.value = true
+      const result = await api.saveProvider(payload())
+      setProvider({ ...result.provider, api_key: '', label: item.label })
+    }
     closeProviderDialog()
   } catch (e) {
     providerError.value = e.message
+  } finally {
+    saving.value = false
+  }
+}
+
+const forgetProvider = async () => {
+  providerError.value = ''
+  try {
+    saving.value = true
+    await api.deleteSavedProvider()
+    resetProvider()
+    closeProviderDialog()
+  } catch (e) {
+    providerError.value = e.message
+  } finally {
+    saving.value = false
   }
 }
 

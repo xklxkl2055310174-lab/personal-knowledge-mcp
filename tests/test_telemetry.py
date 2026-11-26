@@ -39,3 +39,20 @@ def test_task_trace_round_trip(tmp_path: object) -> None:
     task = store.get_task(task_id)
     assert task and task["answer"] == "回答"
     assert task["status"] == "completed"
+
+
+def test_conversation_memory_persists_and_links_task(tmp_path: object) -> None:
+    store = TraceStore(tmp_path / "traces.sqlite3")  # type: ignore[operator]
+    conversation_id = "conversation_test_01"
+    store.append_conversation_message(conversation_id, "user", "第一问")
+    store.append_conversation_message(conversation_id, "assistant", "第一答")
+    task_id = store.create_task("第二问", "delegated", "relevant", conversation_id)
+
+    messages = store.list_conversation_messages(conversation_id)
+    task = store.get_task(task_id)
+
+    assert [item["role"] for item in messages] == ["user", "assistant"]
+    assert [item["content"] for item in messages] == ["第一问", "第一答"]
+    assert task and task["conversation_id"] == conversation_id
+    assert store.clear_conversation(conversation_id) is True
+    assert store.list_conversation_messages(conversation_id) == []

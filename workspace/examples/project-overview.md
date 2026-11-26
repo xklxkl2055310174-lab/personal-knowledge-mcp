@@ -10,4 +10,6 @@
 - ci_status：查询本地 CI 或 GitHub Actions 状态
 - run_command：在命令白名单和超时限制下执行命令
 
-当前知识问答 Agent 使用 search_notes 检索证据，经过上下文预算管理后，再交给大模型生成答案。
+当前 delegated 知识问答链固定使用 search_notes 检索证据，经过上下文预算管理后，再交给
+总结模型生成答案；它不会自动使用其他四个工具。连接支持工具调用的真实模型并切换到 single
+模式后，模型才可以根据任务从 5 个 MCP 工具中自主选择。

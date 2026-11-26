@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,22 +43,28 @@ from starlette.responses import (
 
 from .agent import (
     AgentTrace,
+    DelegatedAgent,
     KnowledgeAgent,
     ProviderSummaryAgent,
     SummaryAgent,
     ToolCallingAgent,
 )
 from .config import Settings
-from .context import ContextBudgetManager, MetricsRecorder
+from .context import ContextBudgetManager, MetricsRecorder, pack_conversation_history
 from .index import TEXT_SUFFIXES, NoteIndex
+from .provider_store import ProviderStore
 from .providers import ProviderClient, ProviderConfig, ProviderError, provider_catalog
 from .security import SecurityViolation, resolve_inside
 from .telemetry import TraceStore, trace_scope
+
+logger = logging.getLogger(__name__)
 
 STRATEGIES = ("full", "relevant", "summary")
 DEFAULT_BUDGET = 800
 MIN_BUDGET, MAX_BUDGET = 64, 8000
 MAX_QUERY_CHARS = 500
+MAX_MEMORY_TOKENS = 1_200
+_CONVERSATION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>Personal Knowledge MCP</title>
 <body style="font-family:system-ui;max-width:640px;margin:80px auto;line-height:1.7">
@@ -76,6 +84,19 @@ def _fail(code: str, message: str, status: int = 400) -> JSONResponse:
         {"ok": False, "data": None, "error": {"code": code, "message": message}},
         status_code=status,
     )
+
+
+def _nested_exception(
+    error: BaseException, expected: type[Exception]
+) -> Exception | None:
+    if isinstance(error, expected):
+        return error
+    if isinstance(error, BaseExceptionGroup):
+        for nested in error.exceptions:
+            match = _nested_exception(nested, expected)
+            if match is not None:
+                return match
+    return None
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -101,11 +122,29 @@ def _parse_query_and_budget(body: dict[str, Any]) -> tuple[str, int] | JSONRespo
     return query, budget
 
 
-def _parse_provider(body: dict[str, Any]) -> ProviderConfig | JSONResponse | None:
+def _parse_conversation_id(body: dict[str, Any]) -> str | JSONResponse:
+    value = str(body.get("conversation_id") or uuid.uuid4().hex).strip()
+    if not _CONVERSATION_ID.fullmatch(value):
+        return _fail(
+            "invalid_conversation_id",
+            "conversation_id 只能包含字母、数字、下划线和连字符，长度为 8-64",
+        )
+    return value
+
+
+def _parse_provider(
+    body: dict[str, Any], store: ProviderStore | None = None
+) -> ProviderConfig | JSONResponse | None:
     try:
         if "provider" not in body:
-            return ProviderConfig.from_environment()
-        return ProviderConfig.from_payload(body.get("provider"))
+            return ProviderConfig.from_environment() or (store.load() if store else None)
+        payload = body.get("provider")
+        if isinstance(payload, dict) and payload.get("use_saved") is True:
+            saved = store.load() if store else None
+            if saved is None:
+                raise ProviderError("没有已保存的模型配置，请重新输入 API Key")
+            return saved
+        return ProviderConfig.from_payload(payload)
     except ProviderError as exc:
         return _fail("invalid_provider", str(exc))
 
@@ -126,6 +165,7 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         os.getenv("MCP_WEB_DIST", str(settings.project_root / "web" / "dist"))
     ).resolve()
     traces_store = TraceStore(settings.runtime_root / "traces.sqlite3")
+    provider_store = ProviderStore(settings.project_root / ".private" / "provider-config.json")
     note_index = NoteIndex(
         notes_root,
         settings.runtime_root / "notes-index.sqlite3",
@@ -133,6 +173,20 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
     )
     background_tasks: dict[str, asyncio.Task[None]] = {}
     task_events: dict[str, list[dict[str, Any]]] = {}
+
+    def load_memory(
+        conversation_id: str, budget: int
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        stored = traces_store.list_conversation_messages(conversation_id, 50)
+        packed = pack_conversation_history(stored, min(budget, MAX_MEMORY_TOKENS))
+        return packed.messages, {
+            "injected_messages": len(packed.messages),
+            "stored_messages": len(stored),
+            "estimated_tokens": packed.estimated_tokens,
+            "original_tokens": packed.original_tokens,
+            "max_tokens": packed.max_tokens,
+            "truncated": packed.truncated,
+        }
 
     def emit(task_id: str, event: str, **data: Any) -> None:
         task_events.setdefault(task_id, []).append(
@@ -150,26 +204,109 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         provider: ProviderConfig | None,
         mode: str = "delegated",
         task_id: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> list[dict]:
         traces: list[dict[str, Any]] = []
+        history = history or []
+        if mode == "single" and provider is None:
+            raise ProviderError("自主工具模式需要连接支持工具调用的真实模型")
         # In-memory MCP client: same JSON-RPC protocol as /mcp, without a network hop.
         async with Client(server) as client:
-            if mode == "single" and provider:
-                single = ToolCallingAgent(
-                    client,
-                    ProviderClient(provider),
-                    ContextBudgetManager(budget),
+            # A real provider activates the actual orchestration mode.  Multi-strategy
+            # comparison intentionally keeps using the deterministic QA chain because
+            # context strategies are not coordinator-routing strategies.
+            if provider and len(strategies) == 1 and mode in {"single", "delegated"}:
+                started = time.perf_counter()
+                model_client = ProviderClient(provider)
+                runtime_agent = (
+                    ToolCallingAgent(
+                        client,
+                        model_client,
+                        ContextBudgetManager(budget),
+                        context_strategy=strategies[0],
+                    )
+                    if mode == "single"
+                    else DelegatedAgent(
+                        client,
+                        model_client,
+                        ContextBudgetManager(budget),
+                        context_strategy=strategies[0],
+                    )
                 )
                 with trace_scope("agent", task_id):
-                    output = await single.run(query)
+                    output = await runtime_agent.run(query, history)
+                total_ms = int((time.perf_counter() - started) * 1000)
+                evidence = output.detail.get("evidence", [])
+                citations_valid = bool(output.detail.get("citations_valid", True))
+                if mode == "single":
+                    runtime_steps = [
+                        {
+                            "name": "agent_loop",
+                            "title": "单 Agent 工具调用循环",
+                            "duration_ms": total_ms,
+                            "detail": {
+                                **output.detail,
+                                "input_tokens": output.input_tokens,
+                                "output_tokens": output.output_tokens,
+                                "memory_messages": len(history),
+                            },
+                        }
+                    ]
+                else:
+                    delegation_log = output.detail.get("delegation_log", [])
+                    delegated_ms = sum(
+                        int(item.get("duration_ms", 0)) for item in delegation_log
+                    )
+                    runtime_steps = [
+                        {
+                            "name": "intake",
+                            "title": "协调 Agent · 分析与拆解任务",
+                            "duration_ms": 0,
+                            "detail": {
+                                "query": query,
+                                "strategy": strategies[0],
+                                "budget": budget,
+                                "memory_messages": len(history),
+                                "available_specialists": [
+                                    "知识检索", "文件操作", "Git 查询", "CI 状态", "命令执行"
+                                ],
+                            },
+                        },
+                        *[
+                            {
+                                "name": f"delegation_{index}",
+                                "title": (
+                                    f"委派 {index} · "
+                                    f"{item.get('label', item.get('specialist'))}"
+                                ),
+                                "duration_ms": int(item.get("duration_ms", 0)),
+                                "detail": item,
+                            }
+                            for index, item in enumerate(delegation_log, start=1)
+                        ],
+                        {
+                            "name": "coordination",
+                            "title": "协调 Agent · 汇总与结果校验",
+                            "duration_ms": max(0, total_ms - delegated_ms),
+                            "detail": {
+                                key: value
+                                for key, value in output.detail.items()
+                                if key != "delegation_log"
+                            }
+                            | {
+                                "input_tokens": output.input_tokens,
+                                "output_tokens": output.output_tokens,
+                            },
+                        },
+                    ]
                 return [
                     {
                         "query": query,
                         "strategy": strategies[0],
-                        "mode": "single",
+                        "mode": mode,
                         "answer": output.text,
-                        "success": True,
-                        "evidence": [],
+                        "success": citations_valid,
+                        "evidence": evidence,
                         "context": {
                             "text": "",
                             "strategy": strategies[0],
@@ -182,16 +319,9 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
                             "summarized": False,
                             "saved_ratio": 0.0,
                         },
-                        "steps": [
-                            {
-                                "name": "agent_loop",
-                                "title": "单 Agent 工具调用循环",
-                                "duration_ms": 0,
-                                "detail": output.detail,
-                            }
-                        ],
-                        "total_ms": 0,
-                        "citations_valid": True,
+                        "steps": runtime_steps,
+                        "total_ms": total_ms,
+                        "citations_valid": citations_valid,
                         "output_path": None,
                     }
                 ]
@@ -210,23 +340,54 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
                         query,
                         strategy,
                         mode=mode,  # type: ignore[arg-type]
+                        history=history,
                     )
                 traces.append(_trace_to_dict(trace))
         return traces
 
     @server.custom_route("/api/providers", ["GET"])
     async def providers(_: Request) -> JSONResponse:
+        try:
+            saved_provider = provider_store.public()
+        except ProviderError as exc:
+            return _fail("saved_provider_invalid", str(exc), 500)
         return _ok(
             {
                 "providers": provider_catalog(),
-                "secret_storage": "request-memory-or-server-environment",
-                "server_provider_configured": ProviderConfig.from_environment() is not None,
+                "secret_storage": "windows-dpapi",
+                "server_provider_configured": (
+                    ProviderConfig.from_environment() is not None or saved_provider is not None
+                ),
+                "saved_provider": saved_provider,
             }
         )
 
+    @server.custom_route("/api/provider/save", ["POST"])
+    async def provider_save(request: Request) -> JSONResponse:
+        try:
+            config = ProviderConfig.from_payload((await _body(request)).get("provider"))
+            if config is None:
+                return _fail("invalid_provider", "本地演示模式不需要保存 API Key")
+            saved = provider_store.save(config)
+        except ProviderError as exc:
+            return _fail("provider_save_failed", str(exc))
+        except OSError:
+            logger.exception("Failed to persist provider configuration")
+            return _fail("provider_save_failed", "无法写入本机私有配置目录", 500)
+        return _ok({"saved": True, "provider": saved})
+
+    @server.custom_route("/api/provider/saved", ["DELETE"])
+    async def provider_delete(_: Request) -> JSONResponse:
+        try:
+            provider_store.delete()
+        except OSError:
+            logger.exception("Failed to delete provider configuration")
+            return _fail("provider_delete_failed", "无法删除本机模型配置", 500)
+        return _ok({"deleted": True})
+
     @server.custom_route("/api/provider/test", ["POST"])
     async def provider_test(request: Request) -> JSONResponse:
-        parsed = _parse_provider(await _body(request))
+        parsed = _parse_provider(await _body(request), provider_store)
         if isinstance(parsed, JSONResponse):
             return parsed
         if parsed is None:
@@ -282,7 +443,11 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         parsed = _parse_query_and_budget(body)
         if isinstance(parsed, JSONResponse):
             return parsed
-        provider = _parse_provider(body)
+        conversation_id = _parse_conversation_id(body)
+        if isinstance(conversation_id, JSONResponse):
+            return conversation_id
+        history, memory_meta = load_memory(conversation_id, parsed[1])
+        provider = _parse_provider(body, provider_store)
         if isinstance(provider, JSONResponse):
             return provider
         strategy = str(body.get("strategy") or "relevant")
@@ -291,13 +456,63 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         mode = str(body.get("mode") or "delegated")
         if mode not in {"single", "delegated"}:
             return _fail("invalid_mode", "mode 必须是 single / delegated")
+        traces_store.append_conversation_message(
+            conversation_id,
+            "user",
+            parsed[0],
+            {"mode": mode, "strategy": strategy},
+        )
         try:
-            [trace] = await run_strategies(*parsed, (strategy,), provider, mode)
+            [trace] = await run_strategies(
+                *parsed,
+                (strategy,),
+                provider,
+                mode,
+                history=history,
+            )
         except ProviderError as exc:
             return _fail("provider_failed", str(exc), 502)
         except RuntimeError as exc:  # search_notes returned ok=false
             return _fail("agent_failed", str(exc), 422)
+        except Exception as exc:
+            provider_error = _nested_exception(exc, ProviderError)
+            if provider_error is not None:
+                return _fail("provider_failed", str(provider_error), 502)
+            agent_error = _nested_exception(exc, RuntimeError)
+            if agent_error is not None:
+                return _fail("agent_failed", str(agent_error), 422)
+            logger.exception("Unhandled Agent request failure")
+            return _fail(
+                "agent_internal_error",
+                "Agent 内部发生未预期错误，请查看 PyCharm 后端控制台中的 traceback",
+                500,
+            )
+        traces_store.append_conversation_message(
+            conversation_id,
+            "assistant",
+            trace["answer"],
+            {"mode": mode, "strategy": strategy},
+        )
+        trace["conversation_id"] = conversation_id
+        trace["memory"] = {**memory_meta, "stored_messages": memory_meta["stored_messages"] + 2}
         return _ok(trace)
+
+    @server.custom_route("/api/conversations/{conversation_id}", ["GET", "DELETE"])
+    async def conversation(request: Request) -> JSONResponse:
+        conversation_id = request.path_params["conversation_id"]
+        if not _CONVERSATION_ID.fullmatch(conversation_id):
+            return _fail("invalid_conversation_id", "conversation_id 格式不合法")
+        if request.method == "DELETE":
+            cleared = traces_store.clear_conversation(conversation_id)
+            return _ok({"conversation_id": conversation_id, "cleared": cleared})
+        messages = traces_store.list_conversation_messages(conversation_id, 50)
+        return _ok(
+            {
+                "conversation_id": conversation_id,
+                "messages": messages,
+                "message_count": len(messages),
+            }
+        )
 
     @server.custom_route("/api/agent/compare", ["POST"])
     async def agent_compare(request: Request) -> JSONResponse:
@@ -305,7 +520,7 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         parsed = _parse_query_and_budget(body)
         if isinstance(parsed, JSONResponse):
             return parsed
-        provider = _parse_provider(body)
+        provider = _parse_provider(body, provider_store)
         if isinstance(provider, JSONResponse):
             return provider
         try:
@@ -373,11 +588,27 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         strategy: str,
         budget: int,
         provider: ProviderConfig | None,
+        conversation_id: str,
+        history: list[dict[str, str]],
+        memory_meta: dict[str, Any],
     ) -> None:
         traces_store.update_task(task_id, status="running")
         emit(task_id, "step_started", step="agent")
         try:
-            [trace] = await run_strategies(query, budget, (strategy,), provider, mode, task_id)
+            [trace] = await run_strategies(
+                query,
+                budget,
+                (strategy,),
+                provider,
+                mode,
+                task_id,
+                history,
+            )
+            trace["conversation_id"] = conversation_id
+            trace["memory"] = {
+                **memory_meta,
+                "stored_messages": memory_meta["stored_messages"] + 2,
+            }
             for step in trace.get("steps", []):
                 traces_store.record_step(
                     task_id,
@@ -403,7 +634,7 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
                 (
                     step.get("detail", {})
                     for step in reversed(trace.get("steps", []))
-                    if step.get("name") in {"summary", "agent_loop"}
+                    if step.get("name") in {"summary", "agent_loop", "coordination"}
                 ),
                 {},
             )
@@ -419,6 +650,12 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
                 status="completed",
                 answer=trace["answer"],
                 metrics_json=json.dumps(trace, ensure_ascii=False),
+            )
+            traces_store.append_conversation_message(
+                conversation_id,
+                "assistant",
+                trace["answer"],
+                {"mode": mode, "strategy": strategy, "task_id": task_id},
             )
             emit(task_id, "task_finished", status="completed")
         except asyncio.CancelledError:
@@ -453,7 +690,7 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
         parsed = _parse_query_and_budget(body)
         if isinstance(parsed, JSONResponse):
             return parsed
-        provider = _parse_provider(body)
+        provider = _parse_provider(body, provider_store)
         if isinstance(provider, JSONResponse):
             return provider
         mode = str(body.get("mode") or "delegated")
@@ -462,12 +699,34 @@ def register_web_routes(server: MCPServer, settings: Settings) -> None:
             return _fail("invalid_mode", "mode 必须是 single / delegated")
         if strategy not in STRATEGIES:
             return _fail("invalid_strategy", "strategy 必须是 full / relevant / summary")
-        task_id = traces_store.create_task(parsed[0], mode, strategy)
+        conversation_id = _parse_conversation_id(body)
+        if isinstance(conversation_id, JSONResponse):
+            return conversation_id
+        history, memory_meta = load_memory(conversation_id, parsed[1])
+        traces_store.append_conversation_message(
+            conversation_id,
+            "user",
+            parsed[0],
+            {"mode": mode, "strategy": strategy},
+        )
+        task_id = traces_store.create_task(parsed[0], mode, strategy, conversation_id)
         emit(task_id, "step_started", step="queued")
         background_tasks[task_id] = asyncio.create_task(
-            execute_task(task_id, parsed[0], mode, strategy, parsed[1], provider)
+            execute_task(
+                task_id,
+                parsed[0],
+                mode,
+                strategy,
+                parsed[1],
+                provider,
+                conversation_id,
+                history,
+                memory_meta,
+            )
         )
-        return _ok({"task_id": task_id, "status": "queued"})
+        return _ok(
+            {"task_id": task_id, "status": "queued", "conversation_id": conversation_id}
+        )
 
     @server.custom_route("/api/tasks/{task_id}", ["GET"])
     async def task_detail(request: Request) -> JSONResponse:

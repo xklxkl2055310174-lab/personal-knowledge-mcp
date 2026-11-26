@@ -8,7 +8,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from knowledge_mcp.config import Settings
-from knowledge_mcp.providers import Completion
+from knowledge_mcp.providers import Completion, ModelTurn, ProviderConfig, ToolCall
 from knowledge_mcp.server import create_server
 
 
@@ -47,6 +47,55 @@ def test_provider_catalog_does_not_return_secrets(client: TestClient) -> None:
     assert "api_key" not in json.dumps(body)
 
 
+def test_provider_can_be_saved_and_reused_without_returning_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "knowledge_mcp.provider_store.protect_secret",
+        lambda value: value[::-1],
+    )
+    monkeypatch.setattr(
+        "knowledge_mcp.provider_store.unprotect_secret",
+        lambda value: value[::-1],
+    )
+    saved = client.post(
+        "/api/provider/save",
+        json={
+            "provider": {
+                "id": "deepseek",
+                "model": "deepseek-chat",
+                "api_key": "must-not-return",
+            }
+        },
+    )
+
+    assert saved.status_code == 200
+    assert "must-not-return" not in saved.text
+    catalog = client.get("/api/providers").json()["data"]
+    assert catalog["saved_provider"]["id"] == "deepseek"
+    assert "api_key" not in json.dumps(catalog)
+
+    class FakeProviderClient:
+        def __init__(self, config: ProviderConfig) -> None:
+            assert config.api_key == "must-not-return"
+
+        async def answer(self, query: str, context: str) -> Completion:
+            return Completion("连接成功", 2, 2)
+
+    monkeypatch.setattr("knowledge_mcp.web.ProviderClient", FakeProviderClient)
+    tested = client.post(
+        "/api/provider/test",
+        json={"provider": {"use_saved": True}},
+    )
+    assert tested.status_code == 200
+    assert tested.json()["data"]["connected"] is True
+    assert "must-not-return" not in tested.text
+
+    deleted = client.delete("/api/provider/saved")
+    assert deleted.status_code == 200
+    assert client.get("/api/providers").json()["data"]["saved_provider"] is None
+
+
 def test_notes_list_and_content(client: TestClient) -> None:
     notes = client.get("/api/notes").json()["data"]["notes"]
     assert [item["path"] for item in notes] == ["mcp.md"]
@@ -80,17 +129,39 @@ def test_agent_ask_returns_five_stage_trace(client: TestClient) -> None:
     assert data["context"]["estimated_tokens"] <= 200
 
 
-def test_agent_ask_uses_configured_llm_without_exposing_key(
+def test_delegated_agent_uses_configured_llm_without_exposing_key(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeProviderClient:
         def __init__(self, config: object) -> None:
             self.config = config
 
-        async def answer(self, query: str, context: str) -> Completion:
-            assert query == "MCP Agent"
-            assert "mcp.md:3" in context
-            return Completion("真实 LLM 基于 MCP 证据回答", 21, 8)
+        async def chat(self, messages: list[dict], tools: list[dict]) -> ModelTurn:
+            system = messages[0]["content"]
+            has_tool_result = any(message["role"] == "tool" for message in messages)
+            if system.startswith("你是多 Agent 系统中的协调 Agent"):
+                if not has_tool_result:
+                    return ModelTurn(
+                        "",
+                        (
+                            ToolCall(
+                                "delegate-1",
+                                "delegate_knowledge",
+                                {"task": "检索并回答 MCP Agent"},
+                            ),
+                        ),
+                        5,
+                        2,
+                    )
+                return ModelTurn("真实 LLM 基于 MCP 证据回答（mcp.md:3）", (), 8, 8)
+            if not has_tool_result:
+                return ModelTurn(
+                    "",
+                    (ToolCall("search-1", "search_notes", {"query": "MCP Agent"}),),
+                    5,
+                    2,
+                )
+            return ModelTurn("子 Agent 找到证据（mcp.md:3）", (), 8, 6)
 
     monkeypatch.setattr("knowledge_mcp.web.ProviderClient", FakeProviderClient)
     response = client.post(
@@ -110,10 +181,184 @@ def test_agent_ask_uses_configured_llm_without_exposing_key(
     data = response.json()["data"]
 
     assert response.status_code == 200
-    assert data["answer"] == "真实 LLM 基于 MCP 证据回答"
-    assert data["steps"][3]["detail"]["mode"] == "llm"
-    assert data["steps"][3]["detail"]["model"] == "interview-model"
+    assert data["answer"] == "真实 LLM 基于 MCP 证据回答（mcp.md:3）"
+    assert [step["name"] for step in data["steps"]] == [
+        "intake",
+        "delegation_1",
+        "coordination",
+    ]
+    assert data["steps"][1]["title"] == "委派 1 · 知识检索子 Agent"
+    assert data["steps"][1]["detail"]["tools_used"] == ["search_notes"]
+    search_log = data["steps"][1]["detail"]["tool_call_log"]
+    assert search_log[0]["arguments"] == {"query": "MCP Agent", "top_k": 5}
+    assert search_log[0]["call_limit"] == 3
+    assert search_log[0]["context"]["text"]
+    assert search_log[0]["context"]["truncated"] is False
+    assert data["steps"][2]["detail"]["mode"] == "delegated"
+    assert data["steps"][2]["detail"]["model"] == "interview-model"
+    assert data["steps"][2]["detail"]["specialists_used"] == ["delegate_knowledge"]
     assert "must-not-leak" not in response.text
+
+
+def test_single_agent_recovers_from_file_not_found(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeToolProviderClient:
+        def __init__(self, config: object) -> None:
+            self.config = config
+            self.turn = 0
+
+        async def chat(self, messages: list[dict], tools: list[dict]) -> ModelTurn:
+            self.turn += 1
+            if self.turn == 1:
+                return ModelTurn(
+                    "",
+                    (ToolCall("search-1", "search_notes", {"query": "MCP", "top_k": 5}),),
+                    10,
+                    2,
+                )
+            if self.turn == 2:
+                return ModelTurn(
+                    "",
+                    (
+                        ToolCall(
+                            "read-1",
+                            "file_access",
+                            {"action": "read", "path": "missing.md"},
+                        ),
+                    ),
+                    12,
+                    2,
+                )
+            return ModelTurn(
+                "文件不存在，但知识库证据表明 MCP 分离推理和执行（mcp.md:3）。",
+                (),
+                14,
+                9,
+            )
+
+    monkeypatch.setattr("knowledge_mcp.web.ProviderClient", FakeToolProviderClient)
+    response = client.post(
+        "/api/agent/ask",
+        json={
+            "query": "MCP 是什么",
+            "strategy": "relevant",
+            "max_tokens": 200,
+            "mode": "single",
+            "provider": {
+                "id": "custom",
+                "model": "tool-model",
+                "base_url": "http://127.0.0.1:9999/v1",
+                "api_key": "temporary-test-key",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["mode"] == "single"
+    assert data["citations_valid"] is True
+    assert data["evidence"] == [
+        "mcp.md:3 | MCP separates Agent reasoning from tool execution."
+    ]
+    log = data["steps"][0]["detail"]["tool_call_log"]
+    assert [item["tool"] for item in log] == ["search_notes", "file_access"]
+    assert log[1]["code"] == "file_not_found"
+
+
+def test_single_agent_nested_runtime_error_is_not_http_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingProviderClient:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def chat(self, messages: list[dict], tools: list[dict]) -> ModelTurn:
+            raise RuntimeError("synthetic agent failure")
+
+    monkeypatch.setattr("knowledge_mcp.web.ProviderClient", FailingProviderClient)
+    response = client.post(
+        "/api/agent/ask",
+        json={
+            "query": "检查 Git",
+            "mode": "single",
+            "provider": {
+                "id": "custom",
+                "model": "tool-model",
+                "base_url": "http://127.0.0.1:9999/v1",
+                "api_key": "temporary-test-key",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "agent_failed"
+    assert error["message"] == "synthetic agent failure"
+
+
+def test_conversation_memory_is_injected_and_can_be_cleared(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_messages: list[list[dict]] = []
+
+    class MemoryProviderClient:
+        def __init__(self, config: ProviderConfig) -> None:
+            self.config = config
+
+        async def chat(self, messages: list[dict], tools: list[dict]) -> ModelTurn:
+            seen_messages.append(messages)
+            number = len(seen_messages)
+            return ModelTurn(f"第 {number} 次回答", (), 8, 4)
+
+    monkeypatch.setattr("knowledge_mcp.web.ProviderClient", MemoryProviderClient)
+    provider = {
+        "id": "custom",
+        "model": "memory-model",
+        "base_url": "http://127.0.0.1:9999/v1",
+        "api_key": "temporary-test-key",
+    }
+    conversation_id = "memory_case_01"
+    first = client.post(
+        "/api/agent/ask",
+        json={
+            "query": "我的项目是什么？",
+            "mode": "single",
+            "conversation_id": conversation_id,
+            "provider": provider,
+        },
+    )
+    second = client.post(
+        "/api/agent/ask",
+        json={
+            "query": "它有哪些工具？",
+            "mode": "single",
+            "conversation_id": conversation_id,
+            "provider": provider,
+        },
+    )
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert [item["role"] for item in seen_messages[1]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert seen_messages[1][1]["content"] == "我的项目是什么？"
+    assert seen_messages[1][2]["content"] == "第 1 次回答"
+    second_data = second.json()["data"]
+    assert second_data["conversation_id"] == conversation_id
+    assert second_data["memory"]["injected_messages"] == 2
+
+    history = client.get(f"/api/conversations/{conversation_id}").json()["data"]
+    assert history["message_count"] == 4
+    assert history["messages"][-1]["content"] == "第 2 次回答"
+    cleared = client.delete(f"/api/conversations/{conversation_id}").json()["data"]
+    assert cleared["cleared"] is True
+    assert client.get(f"/api/conversations/{conversation_id}").json()["data"][
+        "message_count"
+    ] == 0
 
 
 def test_agent_compare_runs_all_strategies(client: TestClient) -> None:

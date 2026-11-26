@@ -107,11 +107,26 @@ class TraceStore:
                     number INTEGER NOT NULL, duration_ms INTEGER NOT NULL, outcome TEXT NOT NULL,
                     category TEXT, code TEXT
                 );
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
                 CREATE INDEX IF NOT EXISTS idx_tool_calls_filter
                     ON tool_calls(tool, error_category, caller, created_at);
                 CREATE INDEX IF NOT EXISTS idx_steps_task ON steps(task_id);
+                CREATE INDEX IF NOT EXISTS idx_conversation_messages
+                    ON conversation_messages(conversation_id, id);
                 """
             )
+            task_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "conversation_id" not in task_columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN conversation_id TEXT")
 
     def record_tool_call(
         self,
@@ -208,14 +223,103 @@ class TraceStore:
             )
             return [dict(row) for row in rows]
 
-    def create_task(self, query: str, mode: str, strategy: str) -> str:
+    def ensure_conversation(self, conversation_id: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._db() as db:
+            db.execute(
+                """INSERT INTO conversations(id, created_at, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at""",
+                (conversation_id, now, now),
+            )
+
+    def append_conversation_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        if role not in {"user", "assistant"}:
+            raise ValueError("conversation role must be user or assistant")
+        self.ensure_conversation(conversation_id)
+        now = datetime.now(UTC).isoformat()
+        with self._db() as db:
+            cursor = db.execute(
+                """INSERT INTO conversation_messages(
+                       conversation_id, role, content, created_at, metadata_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    conversation_id,
+                    role,
+                    content[:20_000],
+                    now,
+                    json.dumps(_sanitize(metadata or {}), ensure_ascii=False),
+                ),
+            )
+            db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+            db.execute(
+                """DELETE FROM conversation_messages
+                   WHERE conversation_id = ? AND id NOT IN (
+                       SELECT id FROM conversation_messages WHERE conversation_id = ?
+                       ORDER BY id DESC LIMIT 50
+                   )""",
+                (conversation_id, conversation_id),
+            )
+            return int(cursor.lastrowid)
+
+    def list_conversation_messages(
+        self, conversation_id: str, limit: int = 40
+    ) -> list[dict[str, Any]]:
+        with self._db() as db:
+            rows = db.execute(
+                """SELECT id, role, content, created_at, metadata_json
+                   FROM conversation_messages WHERE conversation_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (conversation_id, min(max(limit, 1), 50)),
+            ).fetchall()
+        result = [dict(row) for row in reversed(rows)]
+        for item in result:
+            try:
+                item["metadata"] = json.loads(item.pop("metadata_json"))
+            except json.JSONDecodeError:
+                item["metadata"] = {}
+        return result
+
+    def clear_conversation(self, conversation_id: str) -> bool:
+        with self._db() as db:
+            exists = db.execute(
+                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            db.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), conversation_id),
+            )
+            return True
+
+    def create_task(
+        self,
+        query: str,
+        mode: str,
+        strategy: str,
+        conversation_id: str | None = None,
+    ) -> str:
         task_id = uuid.uuid4().hex
         now = datetime.now(UTC).isoformat()
         with self._db() as db:
             db.execute(
-                """INSERT INTO tasks(id, created_at, updated_at, query, mode, strategy, status)
-                   VALUES (?, ?, ?, ?, ?, ?, 'queued')""",
-                (task_id, now, now, query, mode, strategy),
+                """INSERT INTO tasks(
+                       id, created_at, updated_at, query, mode, strategy, status, conversation_id)
+                   VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)""",
+                (task_id, now, now, query, mode, strategy, conversation_id),
             )
         return task_id
 

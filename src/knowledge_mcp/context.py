@@ -31,6 +31,57 @@ class ContextPack:
     summarized: bool = False
 
 
+@dataclass(slots=True)
+class ConversationContext:
+    messages: list[dict[str, str]]
+    estimated_tokens: int
+    original_tokens: int
+    truncated: bool
+    max_tokens: int
+
+
+def pack_conversation_history(
+    messages: list[dict[str, Any]], max_tokens: int
+) -> ConversationContext:
+    """Keep the newest valid user/assistant messages within a separate memory budget."""
+
+    if max_tokens < 1:
+        return ConversationContext([], 0, 0, bool(messages), max_tokens)
+    valid = [
+        {"role": str(item["role"]), "content": str(item["content"])}
+        for item in messages
+        if item.get("role") in {"user", "assistant"} and str(item.get("content") or "").strip()
+    ]
+    original_tokens = sum(estimate_tokens(item["content"]) for item in valid)
+    selected: list[dict[str, str]] = []
+    used = 0
+    for item in reversed(valid):
+        item_tokens = estimate_tokens(item["content"])
+        if used + item_tokens > max_tokens:
+            break
+        selected.append(item)
+        used += item_tokens
+    if not selected and valid:
+        newest = valid[-1]
+        content = newest["content"]
+        while estimate_tokens(content) > max_tokens and len(content) > 1:
+            content = content[max(1, len(content) // 8) :]
+        if content != newest["content"]:
+            content = f"…{content}"
+            while estimate_tokens(content) > max_tokens and len(content) > 1:
+                content = f"…{content[2:]}"
+        selected.append({"role": newest["role"], "content": content})
+        used = estimate_tokens(content)
+    selected.reverse()
+    return ConversationContext(
+        selected,
+        used,
+        original_tokens,
+        len(selected) < len(valid),
+        max_tokens,
+    )
+
+
 class ContextBudgetManager:
     def __init__(self, max_tokens: int = 1_200) -> None:
         if max_tokens < 64:

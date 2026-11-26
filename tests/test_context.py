@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from knowledge_mcp.context import ContextBudgetManager, MetricsRecorder, estimate_tokens
+from knowledge_mcp.context import (
+    ContextBudgetManager,
+    MetricsRecorder,
+    estimate_tokens,
+    pack_conversation_history,
+)
 
 
 def test_relevant_context_stays_inside_budget() -> None:
@@ -44,3 +49,18 @@ def test_context_strategies_use_distinct_sources() -> None:
     assert "relevant evidence" in relevant.text
     assert summary.summarized is True
     assert len({full.text, relevant.text, summary.text}) == 3
+
+
+def test_conversation_memory_keeps_newest_messages_inside_budget() -> None:
+    messages = [
+        {"role": "user", "content": "old " * 100},
+        {"role": "assistant", "content": "older answer " * 80},
+        {"role": "user", "content": "最近的问题"},
+        {"role": "assistant", "content": "最近的回答"},
+    ]
+
+    packed = pack_conversation_history(messages, 64)
+
+    assert packed.estimated_tokens <= 64
+    assert packed.messages[-1]["content"] == "最近的回答"
+    assert packed.truncated is True

@@ -118,3 +118,33 @@ def test_gemini_client_uses_native_header_and_response_shape() -> None:
     assert seen["url"].endswith("/models/gemini-test:generateContent")
     assert seen["headers"]["X-goog-api-key"] == "gemini-key"
     assert result.text == "Gemini 回答"
+
+
+def test_anthropic_tool_chat_uses_agent_system_message() -> None:
+    seen = {}
+
+    def urlopen(request: Any, timeout: float) -> FakeResponse:
+        seen["body"] = json.loads(request.data)
+        return FakeResponse(
+            json.dumps(
+                {
+                    "content": [{"type": "text", "text": "完成"}],
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                }
+            ).encode()
+        )
+
+    config = ProviderConfig.from_payload(
+        {"id": "anthropic", "model": "claude-test", "api_key": "test-key"}
+    )
+    assert config is not None
+    result = ProviderClient(config, urlopen=urlopen)._chat_request(
+        [
+            {"role": "system", "content": "自定义 Coding Agent 策略"},
+            {"role": "user", "content": "检查项目"},
+        ],
+        [],
+    )
+
+    assert seen["body"]["system"] == "自定义 Coding Agent 策略"
+    assert result.text == "完成"

@@ -22,7 +22,13 @@ MCP Server 只负责工具发现、Schema 与调用适配；业务在 Service。
 
 full、relevant、summary 使用不同输入：完整命中文档、高分 chunk、压缩 chunk。
 裁剪优先级是低相关块→块正文→末尾字符，来源坐标优先保留。供应商 usage 优先于估算；
-无 usage 时标记 estimate。无模型的 summary 是抽取式，不伪装成生成式摘要。
+无 usage 时标记 estimate。无模型的 summary 是抽取式，不伪装成生成式摘要。这里的
+`max_tokens` 只控制注入证据或单次工具结果，不是供应商累计 token、输出或费用上限。
+
+会话记忆和工具证据分开管理。SQLite 最多保留每个会话 50 条消息；每轮从最新消息向前选择，
+记忆注入不超过 `min(max_tokens, 1200)`。single 直接接收已裁剪历史；delegated 只有协调器接收
+历史，子 Agent 只收到明确子任务。这样既能理解“它/刚才那个”等追问，又减少无关上下文和
+权限扩散。记忆内容是用户问题与最终回答，不包含工具原始结果和系统提示词。
 
 ## Verification Loop
 
@@ -43,17 +49,39 @@ deadline，只重试 retryable timeout/transient。file_access 写前备份、�
 
 ## Agent 模式
 
-delegated 将检索工具权限限制给检索子 Agent，总结子 Agent 无工具。single 把真实 tools/list
-转为模型函数定义，模型调用仍经 MCP Client。两者都有步骤和 token 上限，最终引用必须来自
-本轮证据。无 API Key 时保留确定性流程用于测试，但不产生可用于简历的模型效果数字。
+delegated 使用“协调器→专职子 Agent”两层结构。协调器只看到五个委派函数，不直接执行工具；
+知识、文件、Git、CI、命令子 Agent 通过 RestrictedToolClient 分别只获得一个 MCP 工具，避免
+把所有权限交给每个工作单元。子 Agent 内部仍使用模型 function calling + MCP Client，结果经
+上下文预算裁剪后返回协调器。协调器可按依赖顺序多次委派，并校验知识引用。一个 Provider
+实例可以承担不同角色，但每个角色有独立系统提示、消息上下文和工具白名单。
+
+知识子 Agent 额外设置每任务 3 次 `search_notes` 实际调用上限，避免模型通过无限查询扩大
+token 和延迟。每次返回先按 `path:line` 去重，再做上下文打包；Trace 保存查询参数、调用序号、
+去重数量和实际注入的裁剪后文本。知识答案按段落/列表项计算 `citation_coverage`，未引用本轮
+证据且未明确写“无证据”的结论会触发一次新的模型修订轮。该检查验证引用结构与来源集合，
+不做自然语言蕴含判定。
+
+single 把真实 tools/list 转为模型函数定义，支持工具调用的模型可在 5 个工具中直接选择，调用
+仍经 MCP Client。两种模式都限制最多轮数、记录 token 与实际工具调用，但不设置应用层累计
+token 上限。无 API Key 时 delegated 回退到固定 SearchAgent→ContextBudgetManager→SummaryAgent
+链供离线测试；它不属于动态委派。single 没有模型时直接拒绝运行。
+
+## CI 语义
+
+ci_status 是只读状态查询，不负责触发 CI。本地模式读取 `.github/workflows/*.yml` 和可选的
+`.ci/status.json`，缺少状态文件时 `state=unknown`；GitHub 模式读取 Actions runs。GitHub
+瞬时失败可以回退本地并标记 stale，但本地 unknown 不能解释为 passed 或 failed。
 
 ## 可观测性
 
 SQLite Trace 采用 Task→Step→ToolCall→Attempt；工具参数脱敏、截断。JSONL
 `agent_metrics` 为兼容现有前端保留。SQLite 适合单机项目；生产可迁移到 OpenTelemetry
-与集中存储。
+与集中存储。该审计只覆盖经过 MCP 注册层的调用，不是操作系统级全量行为审计。
 
 ## 评测
 
 规则评测检查期望要点和引用，不以“有检索结果”为成功。workspace 使用临时副本。
 本地模式是 CI 回归；真实模型报告必须写明 provider/model/时间/任务数，不编造对比数字。
+配置支持工具调用的 Provider 后，评测器的 QA 路径按 mode 真实运行 ToolCallingAgent 或
+DelegatedAgent。无 Provider 时仅 delegated 使用固定 KnowledgeAgent 做确定性回归，single
+明确报错。修复前生成的历史报告不能比较编排效果，必须在相同实验条件下重新生成。

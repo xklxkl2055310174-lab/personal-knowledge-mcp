@@ -16,7 +16,13 @@ from typing import Any
 
 from mcp import Client
 
-from .agent import KnowledgeAgent, ProviderSummaryAgent, SummaryAgent
+from .agent import (
+    DelegatedAgent,
+    KnowledgeAgent,
+    ProviderSummaryAgent,
+    SummaryAgent,
+    ToolCallingAgent,
+)
 from .config import Settings
 from .context import ContextBudgetManager, MetricsRecorder, estimate_tokens
 from .providers import ProviderClient, ProviderConfig
@@ -71,6 +77,14 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             allowed_commands=source_settings.allowed_commands,
         )
         provider_config = ProviderConfig.from_environment()
+        if args.mode == "single" and provider_config is None:
+            raise RuntimeError(
+                "--mode single 需要通过环境变量配置支持工具调用的真实 Provider"
+            )
+        if provider_config and not provider_config.public().get("supports_tools"):
+            raise RuntimeError(
+                f"Provider {provider_config.id} 不支持当前 Agent 所需的工具调用协议"
+            )
         summary_agent = (
             ProviderSummaryAgent(ProviderClient(provider_config))
             if provider_config
@@ -78,7 +92,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         )
         server = create_server(settings)
         async with Client(server) as client:
-            agent = KnowledgeAgent(
+            knowledge_agent = KnowledgeAgent(
                 client,
                 ContextBudgetManager(args.max_tokens),
                 MetricsRecorder(temp / "runtime" / "eval-metrics.jsonl"),
@@ -87,22 +101,55 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             for task in tasks:
                 started = time.perf_counter()
                 if task["kind"] == "qa":
-                    trace = await agent.answer_with_trace(
-                        task["query"], args.strategy, mode=args.mode
-                    )
-                    observed = trace.answer
+                    if provider_config:
+                        model_client = ProviderClient(provider_config)
+                        runtime_agent = (
+                            ToolCallingAgent(
+                                client,
+                                model_client,
+                                ContextBudgetManager(args.max_tokens),
+                                context_strategy=args.strategy,
+                            )
+                            if args.mode == "single"
+                            else DelegatedAgent(
+                                client,
+                                model_client,
+                                ContextBudgetManager(args.max_tokens),
+                                context_strategy=args.strategy,
+                            )
+                        )
+                        output = await runtime_agent.run(task["query"])
+                        observed = output.text
+                        evidence = list(output.detail.get("evidence", []))
+                        citation_valid = bool(evidence) and bool(
+                            output.detail.get("citations_valid", False)
+                        )
+                        input_tokens = output.input_tokens or 0
+                        output_tokens = output.output_tokens or estimate_tokens(observed)
+                        tool_calls = int(output.detail.get("tool_calls", 0))
+                    else:
+                        trace = await knowledge_agent.answer_with_trace(
+                            task["query"], args.strategy, mode="delegated"
+                        )
+                        observed = trace.answer
+                        citation_valid = trace.citations_valid
+                        input_tokens = trace.context.estimated_tokens
+                        output_tokens = estimate_tokens(trace.answer)
+                        tool_calls = sum(
+                            1 for step in trace.steps if step.detail.get("tool")
+                        )
                     expected = task.get("expected_terms", [])
                     matched = sum(term.casefold() in observed.casefold() for term in expected)
                     hit_rate = matched / len(expected) if expected else 1.0
-                    success = hit_rate >= task.get("threshold", 0.6) and trace.citations_valid
+                    success = hit_rate >= task.get("threshold", 0.6) and citation_valid
                     row = {
                         "id": task["id"],
                         "success": success,
                         "keypoint_hit_rate": hit_rate,
-                        "citation_valid": trace.citations_valid,
-                        "input_tokens": trace.context.estimated_tokens,
-                        "output_tokens": estimate_tokens(trace.answer),
-                        "tool_calls": sum(1 for step in trace.steps if step.detail.get("tool")),
+                        "citation_valid": citation_valid,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "tool_calls": tool_calls,
                         "retries": 0,
                         "error_category": None,
                     }

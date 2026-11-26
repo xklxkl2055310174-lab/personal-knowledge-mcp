@@ -27,65 +27,87 @@
 
           <!-- search_notes -->
           <div v-if="name === 'search_notes'" class="grid form-grid">
-            <label class="field wide">query<input v-model="forms.search_notes.query" /></label>
-            <label class="field">top_k（1-20）<input v-model.number="forms.search_notes.top_k" type="number" /></label>
+            <label class="field wide">检索问题<input v-model="forms.search_notes.query" /></label>
+            <label class="field">最大返回数量（1-20）<input v-model.number="forms.search_notes.top_k" type="number" /></label>
           </div>
 
           <!-- file_access -->
           <div v-else-if="name === 'file_access'" class="grid form-grid">
-            <label class="field">action
-              <select v-model="forms.file_access.action"><option>list</option><option>read</option><option>write</option><option>replace</option></select>
+            <label class="field">操作类型
+              <select v-model="forms.file_access.action">
+                <option value="list">列出目录</option>
+                <option value="read">读取文件</option>
+                <option value="write">写入文件</option>
+                <option value="replace">局部替换</option>
+              </select>
             </label>
             <div class="field wide">
-              <label for="file-access-path">path（相对工作区）</label>
+              <label for="file-access-path">工作区相对路径</label>
               <div class="path-picker-row">
                 <input id="file-access-path" v-model="forms.file_access.path" />
                 <button type="button" class="secondary" @click="openFilePicker">浏览…</button>
               </div>
             </div>
-            <label v-if="forms.file_access.action === 'write'" class="field">mode
-              <select v-model="forms.file_access.mode"><option>create</option><option>overwrite</option></select>
+            <label v-if="forms.file_access.action === 'write'" class="field">写入模式
+              <select v-model="forms.file_access.mode">
+                <option value="create">仅新建</option>
+                <option value="overwrite">覆盖现有文件</option>
+              </select>
             </label>
             <label v-if="['write', 'replace'].includes(forms.file_access.action)" class="field wide">
-              expected_sha256（可选，从 read 结果复制）
+              预期文件哈希（可选，从读取结果复制）
               <input v-model.trim="forms.file_access.expected_sha256" class="mono" autocomplete="off" />
             </label>
-            <label v-if="forms.file_access.action === 'write'" class="field full">content
+            <label v-if="forms.file_access.action === 'write'" class="field full">写入内容
               <textarea v-model="forms.file_access.content" class="code" rows="4"></textarea>
             </label>
-            <label v-if="forms.file_access.action === 'replace'" class="field full">old_text（必须唯一命中一次）
+            <label v-if="forms.file_access.action === 'replace'" class="field full">需要替换的原文本（必须唯一命中一次）
               <textarea v-model="forms.file_access.old_text" class="code" rows="4"></textarea>
             </label>
-            <label v-if="forms.file_access.action === 'replace'" class="field full">new_text
+            <label v-if="forms.file_access.action === 'replace'" class="field full">替换后的新文本
               <textarea v-model="forms.file_access.new_text" class="code" rows="4"></textarea>
             </label>
           </div>
 
           <!-- git_query -->
           <div v-else-if="name === 'git_query'" class="grid form-grid">
-            <label class="field">operation
-              <select v-model="forms.git_query.operation"><option>status</option><option>branch</option><option>log</option><option>diff</option></select>
+            <label class="field">查询类型
+              <select v-model="forms.git_query.operation">
+                <option value="status">工作区状态</option>
+                <option value="branch">当前分支</option>
+                <option value="log">提交记录</option>
+                <option value="diff">代码差异</option>
+              </select>
             </label>
-            <label class="field">repo_path<input v-model="forms.git_query.repo_path" /></label>
-            <label class="field">limit（1-50）<input v-model.number="forms.git_query.limit" type="number" /></label>
+            <label class="field">仓库相对路径<input v-model="forms.git_query.repo_path" /></label>
+            <label class="field">最大返回数量（1-50）<input v-model.number="forms.git_query.limit" type="number" /></label>
           </div>
 
           <!-- ci_status -->
           <div v-else-if="name === 'ci_status'" class="grid form-grid">
-            <label class="field">source
-              <select v-model="forms.ci_status.source"><option>local</option><option>github</option></select>
+            <label class="field">状态来源
+              <select v-model="forms.ci_status.source">
+                <option value="local">本地记录</option>
+                <option value="github">GitHub Actions</option>
+              </select>
             </label>
-            <label v-if="forms.ci_status.source === 'github'" class="field">repository（owner/name）<input v-model="forms.ci_status.repository" placeholder="astral-sh/uv" /></label>
-            <label class="field">limit（1-20）<input v-model.number="forms.ci_status.limit" type="number" /></label>
+            <label v-if="forms.ci_status.source === 'github'" class="field">GitHub 仓库（所有者/仓库名）<input v-model="forms.ci_status.repository" placeholder="astral-sh/uv" /></label>
+            <label class="field">最大返回数量（1-20）<input v-model.number="forms.ci_status.limit" type="number" /></label>
           </div>
 
           <!-- run_command -->
           <div v-else-if="name === 'run_command'" class="grid form-grid">
-            <label class="field full">command（按空格拆分为参数数组，支持引号）
+            <label class="field full">命令（按空格拆分为参数数组，支持引号）
               <input v-model="forms.run_command.command" class="mono" />
             </label>
-            <label class="field">cwd<input v-model="forms.run_command.cwd" /></label>
-            <label class="field">timeout_seconds（≤ 30）<input v-model.number="forms.run_command.timeout_seconds" type="number" step="0.5" /></label>
+            <div class="field wide">
+              <label for="run-command-cwd">工作目录（相对安全工作区）</label>
+              <div class="path-picker-row">
+                <input id="run-command-cwd" v-model="forms.run_command.cwd" />
+                <button type="button" class="secondary" @click="openCwdPicker">浏览…</button>
+              </div>
+            </div>
+            <label class="field">超时时间（秒，最大30）<input v-model.number="forms.run_command.timeout_seconds" type="number" step="0.5" /></label>
           </div>
 
           <div class="row">
@@ -155,7 +177,7 @@
       >
         <header class="file-picker-head">
           <div>
-            <h2 id="file-picker-title">选择安全工作区路径</h2>
+            <h2 id="file-picker-title">{{ filePicker.purpose === 'cwd' ? '选择命令工作目录' : '选择安全工作区路径' }}</h2>
             <p class="muted small">仅通过 MCP <code>file_access</code> 浏览，不会显示服务器绝对路径。</p>
           </div>
           <button type="button" class="icon-button" aria-label="关闭文件选择器" @click="closeFilePicker">×</button>
@@ -175,7 +197,7 @@
             <button
               type="button"
               class="picker-entry"
-              :disabled="entry.type === 'file' && forms.file_access.action === 'list'"
+              :disabled="entry.type === 'file' && (filePicker.purpose === 'cwd' || forms.file_access.action === 'list')"
               :aria-label="pickerEntryLabel(entry)"
               @click="choosePickerEntry(entry)"
             >
@@ -187,7 +209,7 @@
         </ul>
         <div v-else class="picker-state muted">当前目录为空</div>
 
-        <div v-if="forms.file_access.action === 'write'" class="picker-write">
+        <div v-if="filePicker.purpose === 'file' && forms.file_access.action === 'write'" class="picker-write">
           <p class="picker-write-hint small">
             点击上方已有文件可直接选择并返回；也可以在当前目录输入文件名，创建新文件或覆盖同名文件。
           </p>
@@ -204,7 +226,7 @@
 
         <footer class="picker-actions">
           <button
-            v-if="forms.file_access.action === 'list'"
+            v-if="filePicker.purpose === 'cwd' || forms.file_access.action === 'list'"
             type="button"
             :disabled="filePicker.loading || !!filePicker.error"
             @click="chooseCurrentDirectory"
@@ -212,7 +234,7 @@
             选择当前目录
           </button>
           <button
-            v-if="forms.file_access.action === 'write'"
+            v-if="filePicker.purpose === 'file' && forms.file_access.action === 'write'"
             type="button"
             :disabled="filePicker.loading || !!filePicker.error"
             @click="chooseWriteTarget"
@@ -247,6 +269,7 @@ const history = reactive([])
 const filePickerDialog = ref(null)
 const filePicker = reactive({
   open: false,
+  purpose: 'file',
   current: '.',
   entries: [],
   loading: false,
@@ -298,7 +321,9 @@ const presets = {
   ]
 }
 
-const description = computed(() => descriptions.value[name.value] || TOOL_META[name.value].guard)
+const description = computed(() => (
+  TOOL_META[name.value].description || descriptions.value[name.value] || TOOL_META[name.value].guard
+))
 
 const normalizePickerPath = value => {
   const raw = String(value ?? '').trim().replace(/\\/g, '/')
@@ -343,6 +368,7 @@ const formatBytes = value => {
 
 const pickerEntryLabel = entry => {
   if (entry.type === 'directory') return `进入目录 ${entry.name}`
+  if (filePicker.purpose === 'cwd') return `${entry.name} 是文件，不能作为命令工作目录`
   if (forms.file_access.action === 'write') return `选择已有文件作为写入目标 ${entry.name}`
   if (forms.file_access.action === 'replace') return `选择文件进行局部替换 ${entry.name}`
   return `选择文件 ${entry.name}`
@@ -379,6 +405,7 @@ const loadPickerDirectory = async path => {
 }
 
 const openFilePicker = async () => {
+  filePicker.purpose = 'file'
   const action = forms.file_access.action
   const entered = normalizePickerPath(forms.file_access.path)
   let initial = '.'
@@ -403,6 +430,18 @@ const openFilePicker = async () => {
   if (!loaded && initial !== '.') await loadPickerDirectory('.')
 }
 
+const openCwdPicker = async () => {
+  filePicker.purpose = 'cwd'
+  filePicker.filename = ''
+  filePicker.filenameError = ''
+  const initial = normalizePickerPath(forms.run_command.cwd) || '.'
+  filePicker.open = true
+  await nextTick()
+  filePickerDialog.value?.focus()
+  const loaded = await loadPickerDirectory(initial)
+  if (!loaded && initial !== '.') await loadPickerDirectory('.')
+}
+
 const closeFilePicker = () => {
   filePicker.open = false
   filePicker.error = ''
@@ -416,14 +455,18 @@ const choosePickerEntry = entry => {
   const selected = joinPickerPath(filePicker.current, entry.name)
   if (entry.type === 'directory') {
     loadPickerDirectory(selected)
-  } else if (['read', 'write', 'replace'].includes(forms.file_access.action)) {
+  } else if (
+    filePicker.purpose === 'file' &&
+    ['read', 'write', 'replace'].includes(forms.file_access.action)
+  ) {
     forms.file_access.path = selected
     closeFilePicker()
   }
 }
 
 const chooseCurrentDirectory = () => {
-  forms.file_access.path = filePicker.current
+  if (filePicker.purpose === 'cwd') forms.run_command.cwd = filePicker.current
+  else forms.file_access.path = filePicker.current
   closeFilePicker()
 }
 

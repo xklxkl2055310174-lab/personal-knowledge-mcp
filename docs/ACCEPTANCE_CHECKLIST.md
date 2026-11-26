@@ -31,6 +31,7 @@
 - [ ] 写入前生成 backup_id；写后验证失败恢复原文。
 - [ ] git status/log 返回结构化字段；非仓库 parameter；超时 timeout。
 - [ ] GitHub 404/401/403/限流/5xx 分类正确；瞬时失败回退 local stale。
+- [ ] 本地无 `.ci/status.json` 时返回 unknown，且文档/界面不把 unknown 解释成失败。
 
 ## 命令安全
 
@@ -43,8 +44,10 @@
 ## Agent、API 与评测
 
 - [ ] 单 Agent 通过模型 function calling + MCP Client 调工具。
-- [ ] 委派模式检索子 Agent 权限受限，总结子 Agent 无工具。
-- [ ] 引用只允许来自本轮证据，结果经 MCP file_access 写入 outputs。
+- [ ] 委派协调器只看到五个 delegate 函数，不直接看到 MCP 工具。
+- [ ] 五个专职子 Agent 各自只能发现并调用被授权的一个 MCP 工具。
+- [ ] 知识引用只允许来自本轮 search_notes 证据；离线回退结果经 MCP file_access 写入 outputs。
 - [ ] Task 历史、详情、取消、SSE 与各指标接口通过。
 - [ ] 30 条评测使用临时 workspace；指标定义不是“检索非空”。
+- [ ] 配置 Provider 后，single/delegated 评测分别真实执行 ToolCallingAgent/DelegatedAgent。
 - [ ] 本地报告明确不可写入简历；真实模型数字可追溯到 reports 文件。
